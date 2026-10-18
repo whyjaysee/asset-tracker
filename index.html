@@ -11,11 +11,15 @@
 <header class="top">
   <span class="name">Net worth</span>
   <span class="sync" id="sync"></span>
-  <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="signout">Sign out</button></span>
+  <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="addpasskey" hidden>Add passkey</button><button type="button" id="signout">Sign out</button></span>
   <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-update">Update</button></nav>
 </header>
 <section class="signin" id="signin" hidden>
   <h1>Net worth</h1>
+  <div class="passkey" id="passkeyblock" hidden>
+    <button class="btn primary" id="usepasskey" type="button">Sign in with a passkey</button>
+    <p class="or">or</p>
+  </div>
   <p>Sign in with the email address you were added with. We'll email you a link.</p>
   <form id="signinform" novalidate>
     <div class="fields">

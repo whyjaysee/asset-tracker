@@ -607,12 +607,44 @@ function safePaint() {
 // ---------- signing in ----------
 function showSignedOut() {
   $('app').hidden = true; $('signin').hidden = false; $('who').hidden = true; $('tabs').hidden = true; $('sync').textContent = ''; setStatus('');
+  $('passkeyblock').hidden = !passkeysSupported;
+  $('sendlink').classList.toggle('primary', !passkeysSupported);
 }
 async function showSignedIn(session) {
   $('signin').hidden = true; $('app').hidden = false; $('who').hidden = false; $('tabs').hidden = false;
   $('whoemail').textContent = session.user.email;
+  $('addpasskey').hidden = !passkeysSupported;
   if (!api.data) refresh();
 }
+
+// Passkeys are tied to the site's domain (set under Authentication, Passkeys in Supabase), so
+// they work on the live site but not on a local preview; the email link works everywhere.
+const passkeysSupported = !!window.PublicKeyCredential;
+function explainPasskey(error) {
+  const code = String(error.code || ''), msg = String(error.message || '');
+  if (code === 'ERROR_CEREMONY_ABORTED') return '';
+  if (/passkey_disabled|not enabled/i.test(code + ' ' + msg)) return 'Passkeys are not turned on in Supabase yet. Use the email link for now.';
+  if (/ERROR_INVALID_(DOMAIN|RP_ID)|origin|rp.?id/i.test(code + ' ' + msg)) return `Passkeys are not set up for ${location.host}. Use the email link here.`;
+  if (code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED') return 'This device already has a passkey for this site.';
+  if (code === 'ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY' || error.cause?.name === 'NotAllowedError') return null;
+  return `Supabase said: ${msg}`;
+}
+$('usepasskey').onclick = async () => {
+  $('usepasskey').disabled = true; $('signinmsg').textContent = '';
+  const { error } = await sb.auth.signInWithPasskey();
+  $('usepasskey').disabled = false;
+  if (!error) return;
+  const text = explainPasskey(error);
+  $('signinmsg').textContent = text ?? 'No passkey was used. If this device has none yet, sign in with the email link, then choose Add passkey at the top.';
+};
+$('addpasskey').onclick = async () => {
+  $('addpasskey').disabled = true;
+  const { error } = await sb.auth.registerPasskey();
+  $('addpasskey').disabled = false;
+  if (!error) return toast('Passkey added. Next time, choose Sign in with a passkey.');
+  const text = explainPasskey(error);
+  if (text !== '') toast(text ?? 'No passkey was added. Try again and confirm the prompt.', true);
+};
 $('signinform').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const email = $('email').value.trim().toLowerCase();

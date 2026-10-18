@@ -193,5 +193,7 @@ details.carried .hint { margin: 10px 0 12px; }
 .signin .fields { display: grid; gap: 12px; }
 .signin input { background: var(--field); border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font-size: 16px; }
 .signin .btn { padding: 11px; }
+.signin .passkey { display: grid; gap: 14px; }
+.signin .passkey .or { text-align: center; font-size: 13px; }
 .who { color: var(--ink-2); font-size: 13px; display: flex; gap: 8px; align-items: center; }
 .who button { border: 0; background: none; color: var(--ink-2); text-decoration: underline; cursor: pointer; padding: 0; font-size: 13px; }

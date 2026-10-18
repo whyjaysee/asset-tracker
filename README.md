@@ -14,7 +14,7 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 |---|---|
 | `index.html`, `styles.css`, `js/app.js` | The website |
 | `js/config.js` | Your Supabase address and public key (safe to publish; see Security) |
-| `js/chart.umd.js`, `js/supabase.js` | Chart.js 4.4.7 and supabase-js 2.45.4, bundled so nothing loads from elsewhere |
+| `js/chart.umd.js`, `js/supabase.js` | Chart.js 4.4.7 and supabase-js 2.118.0, bundled so nothing loads from elsewhere |
 | `supabase/001_setup.sql` | Not in this repository: it holds the imported history. Already run; keep your copy private |
 | `supabase/002_shared_access.sql` | Sign-in access for household members. Run once (step 1) |
 | `supabase/003_lockdown.sql` | Closes the whole project to the public key. Run before the site goes live (step 1) |
@@ -44,7 +44,18 @@ This repository is published with GitHub Pages (Settings, Pages, deploy from the
 Then tell Supabase the address, so sign-in links point back to it:
 Authentication, URL Configuration, set **Site URL** to your site's address and add the same address under **Redirect URLs**.
 
-### 4. Keep the database awake
+### 4. Turn on passkeys
+Supabase dashboard, Authentication, **Passkeys**: turn on passkey authentication and set
+
+- Relying Party Display Name: `Net worth tracker`
+- Relying Party ID: `whyjaysee.github.io`
+- Relying Party Origins: `https://whyjaysee.github.io`
+
+Passkeys are tied to that domain. If the site ever moves to another address, change these and
+everyone adds a new passkey. Passkeys are in beta in Supabase, so the emailed link stays as the
+fallback.
+
+### 5. Keep the database awake
 Supabase pauses free projects after about a week with no activity, and a paused project makes the
 site show "The database is not answering".
 
@@ -60,7 +71,8 @@ Add `http://localhost:5500` to Supabase's Redirect URLs first, or sign-in links 
 it. The local copy uses the live database. Push to `main` to publish.
 
 ## Using it
-- Sign in once per device with the emailed link; you stay signed in after that.
+- On a new device, sign in with the emailed link, then choose **Add passkey** at the top. After that, choose **Sign in with a passkey** and confirm with Face ID, Touch ID or your device PIN. Either way you stay signed in.
+- Passkeys work only on the live site, not on a local preview. Use the emailed link there.
 - Update: the five numbers that change each month are at the top; everything else is carried over from last month.
 - The header shows who saved the latest month and when.
 - Supabase's built-in mailer sends only a few sign-in emails per hour. That's plenty for two people, but if a link doesn't arrive, wait a few minutes before asking again.

@@ -9,7 +9,7 @@ backed by Supabase. Read this before changing anything.
   by design and is fine.
 - **No build step.** Plain HTML, CSS and browser JavaScript. Don't add a bundler, framework,
   npm dependencies or TypeScript without asking. Pushing to `main` deploys.
-- **Don't edit** `js/supabase.js` (supabase-js 2.45.4 UMD) or `js/chart.umd.js` (Chart.js 4.4.7).
+- **Don't edit** `js/supabase.js` (supabase-js 2.118.0 UMD) or `js/chart.umd.js` (Chart.js 4.4.7).
   They're vendored on purpose so the site loads nothing from other hosts.
 - **Database changes go in a new numbered file** in `supabase/` (next is `004_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
@@ -61,6 +61,11 @@ which the page re-renders from. Keep that contract: any new write function must 
 Supabase email magic links (`signInWithOtp`, `shouldCreateUser: false`). Accounts are created
 by invitation in the Supabase dashboard. Allowed redirect URLs live in Supabase under
 Authentication, URL Configuration; add any local preview address there too.
+
+Passkeys (`signInWithPasskey`, `registerPasskey`; beta in Supabase, on by default in supabase-js
+2.118) sit on top of that. A signed-in user adds one from the header; after that it signs them in
+without an email. They're bound to the Relying Party ID set under Authentication, Passkeys
+(`whyjaysee.github.io`), so they don't work on localhost. Keep the email link as the fallback.
 
 ## Running locally
 Serve the folder over HTTP (opening the file directly won't work), for example
