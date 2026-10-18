@@ -621,7 +621,9 @@ $('signinform').addEventListener('submit', async (ev) => {
   const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname } });
   $('sendlink').disabled = false;
   $('signinmsg').textContent = error
-    ? (/not allowed|Signups not allowed|not found/i.test(error.message) ? 'That email has no account yet. Ask the owner to add you in Supabase.' : /rate|seconds/i.test(error.message) ? 'Too many links requested. Wait a few minutes and try again.' : error.message)
+    ? (/Signups not allowed/i.test(error.message) ? `Supabase has no account for ${email}. Check it matches the invited address exactly, dots included.`
+      : /rate|seconds/i.test(error.message) ? 'Too many links requested. Wait a few minutes and try again.'
+      : `Supabase said: ${error.message}`)
     : 'Check your inbox for a sign-in link from Supabase. Open it on this device.';
 });
 $('signout').onclick = async () => { await sb.auth.signOut(); api.data = null; location.hash = ''; showSignedOut(); };
