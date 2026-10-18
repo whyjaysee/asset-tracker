@@ -58,14 +58,15 @@ which the page re-renders from. Keep that contract: any new write function must 
 - Cost basis = running sum of `stock_added` / `crypto_added` converted at each month's fx.
 
 ## Sign-in
-Supabase email magic links (`signInWithOtp`, `shouldCreateUser: false`). Accounts are created
-by invitation in the Supabase dashboard. Allowed redirect URLs live in Supabase under
-Authentication, URL Configuration; add any local preview address there too.
+Email and password (`signInWithPassword`). The form uses `autocomplete="username"` and
+`current-password` so iCloud Keychain and other password managers save and fill it. The site
+never signs anyone up; the two accounts are created in the Supabase dashboard, and passwords are
+set there or with a one-off SQL update that is never committed. No sign-in emails are sent.
 
 Passkeys (`signInWithPasskey`, `registerPasskey`; beta in Supabase, on by default in supabase-js
 2.118) sit on top of that. A signed-in user adds one from the header; after that it signs them in
-without an email. They're bound to the Relying Party ID set under Authentication, Passkeys
-(`whyjaysee.github.io`), so they don't work on localhost. Keep the email link as the fallback.
+without a password. They're bound to the Relying Party ID set under Authentication, Passkeys
+(`whyjaysee.github.io`), so they don't work on localhost. Keep the password as the fallback.
 
 ## Running locally
 Serve the folder over HTTP (opening the file directly won't work), for example

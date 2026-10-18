@@ -608,23 +608,23 @@ function safePaint() {
 function showSignedOut() {
   $('app').hidden = true; $('signin').hidden = false; $('who').hidden = true; $('tabs').hidden = true; $('sync').textContent = ''; setStatus('');
   $('passkeyblock').hidden = !passkeysSupported;
-  $('sendlink').classList.toggle('primary', !passkeysSupported);
 }
 async function showSignedIn(session) {
   $('signin').hidden = true; $('app').hidden = false; $('who').hidden = false; $('tabs').hidden = false;
+  $('password').value = ''; $('signinmsg').textContent = '';
   $('whoemail').textContent = session.user.email;
   $('addpasskey').hidden = !passkeysSupported;
   if (!api.data) refresh();
 }
 
 // Passkeys are tied to the site's domain (set under Authentication, Passkeys in Supabase), so
-// they work on the live site but not on a local preview; the email link works everywhere.
+// they work on the live site but not on a local preview; the password works everywhere.
 const passkeysSupported = !!window.PublicKeyCredential;
 function explainPasskey(error) {
   const code = String(error.code || ''), msg = String(error.message || '');
   if (code === 'ERROR_CEREMONY_ABORTED') return '';
-  if (/passkey_disabled|not enabled/i.test(code + ' ' + msg)) return 'Passkeys are not turned on in Supabase yet. Use the email link for now.';
-  if (/ERROR_INVALID_(DOMAIN|RP_ID)|origin|rp.?id/i.test(code + ' ' + msg)) return `Passkeys are not set up for ${location.host}. Use the email link here.`;
+  if (/passkey_disabled|not enabled/i.test(code + ' ' + msg)) return 'Passkeys are not turned on in Supabase yet. Use your password for now.';
+  if (/ERROR_INVALID_(DOMAIN|RP_ID)|origin|rp.?id/i.test(code + ' ' + msg)) return `Passkeys are not set up for ${location.host}. Use your password here.`;
   if (code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED') return 'This device already has a passkey for this site.';
   if (code === 'ERROR_PASSTHROUGH_SEE_CAUSE_PROPERTY' || error.cause?.name === 'NotAllowedError') return null;
   return `Supabase said: ${msg}`;
@@ -635,7 +635,7 @@ $('usepasskey').onclick = async () => {
   $('usepasskey').disabled = false;
   if (!error) return;
   const text = explainPasskey(error);
-  $('signinmsg').textContent = text ?? 'No passkey was used. If this device has none yet, sign in with the email link, then choose Add passkey at the top.';
+  $('signinmsg').textContent = text ?? 'No passkey was used. If this device has none yet, sign in with your password, then choose Add passkey at the top.';
 };
 $('addpasskey').onclick = async () => {
   $('addpasskey').disabled = true;
@@ -647,16 +647,16 @@ $('addpasskey').onclick = async () => {
 };
 $('signinform').addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const email = $('email').value.trim().toLowerCase();
-  if (!/^\S+@\S+\.\S+$/.test(email)) return ($('signinmsg').textContent = 'Enter the email address you were added with.');
-  $('sendlink').disabled = true; $('signinmsg').textContent = 'Sending…';
-  const { error } = await sb.auth.signInWithOtp({ email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname } });
-  $('sendlink').disabled = false;
-  $('signinmsg').textContent = error
-    ? (/Signups not allowed/i.test(error.message) ? `Supabase has no account for ${email}. Check it matches the invited address exactly, dots included.`
-      : /rate|seconds/i.test(error.message) ? 'Too many links requested. Wait a few minutes and try again.'
-      : `Supabase said: ${error.message}`)
-    : 'Check your inbox for a sign-in link from Supabase. Open it on this device.';
+  const email = $('email').value.trim().toLowerCase(), password = $('password').value;
+  if (!/^\S+@\S+\.\S+$/.test(email) || !password) return ($('signinmsg').textContent = 'Enter your email address and password.');
+  $('signinbtn').disabled = true; $('signinmsg').textContent = 'Signing in…';
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  $('signinbtn').disabled = false;
+  if (!error) return;
+  $('signinmsg').textContent = /invalid login credentials/i.test(error.message) ? 'That email and password do not match. Check both and try again.'
+    : /not confirmed/i.test(error.message) ? `${email} is not confirmed in Supabase yet. Confirm it under Authentication, Users.`
+    : /rate|seconds|too many/i.test(error.message) ? 'Too many attempts. Wait a few minutes and try again.'
+    : `Supabase said: ${error.message}`;
 });
 $('signout').onclick = async () => { await sb.auth.signOut(); api.data = null; location.hash = ''; showSignedOut(); };
 

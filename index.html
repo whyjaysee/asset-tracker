@@ -16,18 +16,18 @@
 </header>
 <section class="signin" id="signin" hidden>
   <h1>Net worth</h1>
-  <div class="passkey" id="passkeyblock" hidden>
-    <button class="btn primary" id="usepasskey" type="button">Sign in with a passkey</button>
-    <p class="or">or</p>
-  </div>
-  <p>Sign in with the email address you were added with. We'll email you a link.</p>
   <form id="signinform" novalidate>
     <div class="fields">
-      <input type="email" id="email" autocomplete="email" placeholder="you@example.com" aria-label="Email address">
-      <button class="btn primary" id="sendlink" type="submit">Email me a sign-in link</button>
-      <p id="signinmsg" aria-live="polite"></p>
+      <input type="email" id="email" name="email" autocomplete="username" placeholder="Email" aria-label="Email address">
+      <input type="password" id="password" name="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+      <button class="btn primary" id="signinbtn" type="submit">Sign in</button>
     </div>
   </form>
+  <div class="passkey" id="passkeyblock" hidden>
+    <p class="or">or</p>
+    <button class="btn" id="usepasskey" type="button">Sign in with a passkey</button>
+  </div>
+  <p id="signinmsg" aria-live="polite"></p>
 </section>
 <div id="status" aria-live="polite"></div>
 <div id="app" hidden>
