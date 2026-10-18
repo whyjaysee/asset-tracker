@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Net Worth Tracker</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <span class="name">Net worth</span>
+  <span class="sync" id="sync"></span>
+  <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="signout">Sign out</button></span>
+  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-update">Update</button></nav>
+</header>
+<section class="signin" id="signin" hidden>
+  <h1>Net worth</h1>
+  <p>Sign in with the email address you were added with. We'll email you a link.</p>
+  <form id="signinform" novalidate>
+    <div class="fields">
+      <input type="email" id="email" autocomplete="email" placeholder="you@example.com" aria-label="Email address">
+      <button class="btn primary" id="sendlink" type="submit">Email me a sign-in link</button>
+      <p id="signinmsg" aria-live="polite"></p>
+    </div>
+  </form>
+</section>
+<div id="status" aria-live="polite"></div>
+<div id="app" hidden>
+<main>
+<div id="page-overview">
+  <p class="empty" id="ov-empty" hidden>Nothing recorded yet. Open the Update tab to add your first month.</p>
+  <div id="ov-body" hidden>
+  <section class="headline">
+    <div class="asof"><label for="asof">At the end of</label><select id="asof"></select></div>
+    <div class="figure" id="figure"></div>
+    <p class="story" id="story"></p>
+  </section>
+  <section>
+    <div class="classes" id="classes"></div>
+    <div class="sharebar" id="sharebar" aria-hidden="true"></div>
+  </section>
+  <section class="panel">
+    <div class="controls">
+      <div class="seg" id="views" role="group" aria-label="What to show"></div>
+      <div class="right">
+        <div class="seg" id="sub" role="group" aria-label="Options"></div>
+        <div class="seg" id="ranges" role="group" aria-label="Time range"></div>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <p class="charttitle" id="charttitle"></p>
+    <p class="chartnote" id="chartnote"></p>
+    <div class="chartbox"><canvas id="chart" role="img"></canvas></div>
+  </section>
+  <section class="grid2">
+    <div>
+      <h2 id="holdtitle"></h2>
+      <div class="scroll"><table id="holdings"></table></div>
+    </div>
+    <div>
+      <h2>Money in and out</h2>
+      <dl class="flow" id="flow"></dl>
+      <p class="fine" id="flownote"></p>
+    </div>
+  </section>
+  <details>
+    <summary>Every month</summary>
+    <p><button class="btn" id="csv" type="button">Download as CSV</button></p>
+    <div class="scroll"><table id="history"></table></div>
+  </details>
+  </div>
+</div>
+<div id="page-update" hidden>
+  <div class="updatehead">
+    <h1 id="title">Update</h1>
+    <label>Month <input type="month" id="month"></label>
+  </div>
+  <p class="hint" id="hint"></p>
+  <div class="layout">
+    <form id="form" autocomplete="off" novalidate></form>
+    <aside class="summary" aria-live="polite">
+      <div class="muted" id="sumlabel"></div>
+      <div class="figure" id="sumfigure"></div>
+      <div id="sumchange"></div>
+      <dl class="flow" id="sumlist"></dl>
+      <button class="btn primary" id="save" type="button">Save</button>
+      <button class="btn danger" id="delete" type="button" hidden>Delete this month</button>
+    </aside>
+  </div>
+  <details class="manage">
+    <summary>Accounts and holdings</summary>
+    <p class="hint">Tick &quot;Changes monthly&quot; for anything you re-enter every month; the rest sits under &quot;Carried over&quot;. Change where something is checked to move it between sections. Switch off anything you no longer hold and it stays in your history but leaves the form.</p>
+    <div class="scroll"><table id="items"></table></div>
+    <div class="addrow">
+      <input id="newname" placeholder="Name, e.g. SOL" aria-label="Name">
+      <input id="newsrc" placeholder="Where you check it, e.g. Ledger" aria-label="Where you check it">
+      <select id="newcat" aria-label="Group"><option value="cash">Cash</option><option value="stocks">Stocks</option><option value="crypto" selected>Crypto</option></select>
+      <select id="newkind" aria-label="How you enter it"><option value="holding">Units × price</option><option value="balance">A single amount</option></select>
+      <select id="newcur" aria-label="Currency"><option>USD</option><option>SGD</option></select>
+      <button class="btn" id="additem" type="button">Add</button>
+    </div>
+  </details>
+</div>
+</main>
+</div>
+<script src="js/chart.umd.js"></script>
+<script src="js/supabase.js"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
