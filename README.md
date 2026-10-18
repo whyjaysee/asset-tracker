@@ -51,6 +51,14 @@ site show "The database is not answering".
 - If the folder is on GitHub, the included workflow pings it twice a week. Nothing to set up: it starts after the first push. Check the Actions tab once to confirm it ran.
 - Otherwise, when it pauses, open the Supabase dashboard and choose **Restore project** (takes a few minutes).
 
+## Working on the code
+Clone the repository and open the folder in Cursor (or any editor). `AGENTS.md` explains how the
+app fits together; Cursor and Claude read it automatically.
+
+To preview locally, run `python3 -m http.server 5500` in the folder and open http://localhost:5500.
+Add `http://localhost:5500` to Supabase's Redirect URLs first, or sign-in links won't come back to
+it. The local copy uses the live database. Push to `main` to publish.
+
 ## Using it
 - Sign in once per device with the emailed link; you stay signed in after that.
 - Update: the five numbers that change each month are at the top; everything else is carried over from last month.

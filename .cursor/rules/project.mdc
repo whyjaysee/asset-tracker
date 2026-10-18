@@ -1,0 +1,8 @@
+---
+description: Asset tracker project guide
+alwaysApply: true
+---
+Read and follow @AGENTS.md at the repository root before making changes. In short: the repository
+is public (no figures, emails or secret keys), there is no build step, don't edit the vendored
+libraries in js/, database changes go in a new numbered file in supabase/, and the imported
+history is frozen.
