@@ -9,8 +9,11 @@ backed by Supabase. Read this before changing anything.
   by design and is fine.
 - **No build step.** Plain HTML, CSS and browser JavaScript. Don't add a bundler, framework,
   npm dependencies or TypeScript without asking. Pushing to `main` deploys.
-- **Don't edit** `js/supabase.js` (supabase-js 2.118.0 UMD) or `js/chart.umd.js` (Chart.js 4.4.7).
-  They're vendored on purpose so the site loads nothing from other hosts.
+- **Don't edit** `js/supabase.js` (supabase-js 2.118.0 UMD), `js/chart.umd.js` (Chart.js 4.4.7),
+  or `js/pdf.min.js` and `js/pdf.worker.min.js` (pdfjs-dist 3.11.174 legacy UMD build and worker,
+  the last release with a UMD build). They're vendored on purpose so the site loads nothing from
+  other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
+  `isEvalSupported: false`.
 - **Database changes go in a new numbered file** in `supabase/` (next is `005_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
@@ -22,7 +25,7 @@ backed by Supabase. Read this before changing anything.
 | `index.html` | Markup: header, sign-in screen, Overview, Activity and Update tabs |
 | `styles.css` | All styling. Colour tokens at the top, light and dark |
 | `js/config.js` | Supabase URL and anon key |
-| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Activity (`renderActivity`, `addMovement`, ...); tabs; sign-in and start-up |
+| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Activity (`renderActivity`, `addMovement`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
@@ -58,6 +61,20 @@ are not rewritten: a month picks up new units only when it's saved again. Switch
 not carried into a new month, so switching off a total that positions replace (such as
 Stock positions at Saxo) doesn't count it twice. Next: cost basis and gains from movements, then
 prices fetched automatically.
+
+## Citi statement import
+"Import Citi statement" on the Update tab reads a Citibank Singapore PDF statement entirely in the
+browser (pdf.js, loaded only when used) and fills the form for the month the statement ends in;
+it never saves, uploads or keeps the PDF. `textLines` rebuilds lines from pdf.js text items (grouped
+by y, sorted by x); amounts may have a stray space before the decimals ("109,862 .01").
+`readCiti` takes accounts (name, currency, balance) from the Checking and Savings & Investments
+summary, then each account's transactions, telling withdrawals from deposits by the column headers,
+and refuses the whole statement unless opening − withdrawals + deposits = closing for every account.
+The SGD savings account's value is the running balance on its "SALARY PAYMENT" credit (the closing
+balance if there's none), and that credit is the salary. Movements of S$5,000 or more are listed to
+tick as one-offs. Accounts map to Citibank cash items by currency and name (deposits to deposits),
+never by account number: account numbers must never be stored, shown or committed, and statement
+text shown on screen goes through `scrub()`. Never commit a statement or anything taken from one.
 
 ## How the site talks to the database
 The browser never touches tables. It calls these RPC functions through supabase-js:

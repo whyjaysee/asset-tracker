@@ -177,6 +177,21 @@ details.carried summary .sum { font: 14px var(--body); color: var(--ink-2); marg
 details.carried h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 20px 0 6px; }
 details.carried .hint { margin: 10px 0 12px; }
 
+/* Citi statement import */
+.import { background: var(--surface); border: 1px solid var(--accent); border-radius: 14px; padding: 18px 20px; margin: 0 0 24px; }
+.import.error { border-color: var(--down); }
+.import h2 { font-size: 20px; margin: 0 0 4px; }
+.import p { margin: 6px 0; color: var(--ink-2); }
+.import p.err { color: var(--down); font-weight: 600; }
+.import table { margin-top: 10px; }
+.import td, .import th { padding-top: 6px; padding-bottom: 6px; }
+.import td.desc, .import th.desc { text-align: left; white-space: normal; min-width: 160px; }
+.import td.label input { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; width: 100%; min-width: 140px; }
+.import td.label input:disabled { opacity: .5; }
+.import h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 18px 0 0; }
+.import .actions { margin-top: 12px; }
+.updatehead #citi-btn { margin-left: auto; }
+
 /* Activity page */
 select.pick { background: var(--field); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; min-width: 0; }
 .field input[type='date'] { text-align: left; }

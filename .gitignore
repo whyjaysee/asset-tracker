@@ -1,0 +1,4 @@
+# This repository is public: bank statements and exports must never be committed.
+*.pdf
+*.csv
+.DS_Store

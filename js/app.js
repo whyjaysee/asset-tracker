@@ -395,7 +395,7 @@ function showOverview(d) {
   renderControls(); renderMonth(); renderHistory(); buildChart();
 }
 
-let data = null, draft = null, base = null, exists = false, dirty = false, tracked = new Set();
+let data = null, draft = null, base = null, exists = false, dirty = false, tracked = new Set(), imported = new Set();
 
 const parse = (s) => { const v = parseFloat(String(s).replace(/[, ]/g, '')); return isNaN(v) ? null : v; };
 const sym = (cur) => (cur === 'USD' ? 'US$' : 'S$');
@@ -404,6 +404,8 @@ function startDraft(month) {
   const found = data.months.find((m) => m.month === month);
   base = [...data.months].reverse().find((m) => m.month < month) || null;
   exists = !!found; dirty = false;
+  imported = new Set();
+  $('citi').hidden = true;
   if (found) {
     draft = JSON.parse(JSON.stringify(found));
   } else {
@@ -442,6 +444,7 @@ function applyTracked() {
 }
 
 function field(key, value, prefix, label, cls = '') {
+  if (imported.has(key)) cls += ' changed';
   return `<div class="field ${cls}"><span>${prefix}</span><input inputmode="decimal" data-key="${key}" value="${value == null ? '' : plain(value)}" aria-label="${esc(label)}"></div>`;
 }
 
@@ -487,7 +490,7 @@ function renderForm() {
   carried.push(row('S$1 buys', field('m.fx', draft.fx, 'US$', 'US dollars per Singapore dollar', 'span2'), base ? 'was ' + base.fx : ''));
   carried.push(row('Salary', field('m.salary', draft.salary, 'S$', 'Salary', 'span2'), base ? 'was ' + plain(base.salary, 0) : ''));
   names.push('exchange rate', 'salary');
-  h += `<details class="carried" ${base ? '' : 'open'}>
+  h += `<details class="carried" ${base && !imported.size ? '' : 'open'}>
     <summary>Carried over${base ? ' from ' + monthName(base.month) : ''} <span class="sum">${esc(names.join(', '))}</span></summary>
     <p class="hint">These keep last month's value until you change them.</p>
     ${carried.join('')}
@@ -496,7 +499,7 @@ function renderForm() {
     ${row('Added to stocks', field('m.stock_added', draft.stock_added || null, 'US$', 'New money into stocks', 'span2'))}
     ${row('Added to crypto', field('m.crypto_added', draft.crypto_added || null, 'US$', 'New money into crypto', 'span2'))}
     ${row('One-off in (+) or out (−)', field('m.other_flow', draft.other_flow || null, 'S$', 'One-off amount', 'span2'))}
-    ${row('What it was', `<div class="field text span2"><input data-key="note" value="${esc(draft.note)}" placeholder="e.g. house payment, gift" aria-label="Note"></div>`)}
+    ${row('What it was', `<div class="field text span2${imported.has('note') ? ' changed' : ''}"><input data-key="note" value="${esc(draft.note)}" placeholder="e.g. house payment, gift" aria-label="Note"></div>`)}
   </details>`;
   $('form').innerHTML = h;
 }
@@ -571,6 +574,272 @@ $('delete').onclick = async () => {
 };
 
 $('month').onchange = (e) => { if (/^\d{4}-\d{2}$/.test(e.target.value)) startDraft(e.target.value); };
+
+// ---------- Citi statement import ----------
+// The PDF is read in this browser with pdf.js and is never uploaded or kept. Accounts are matched
+// to items by name and currency; account numbers are skipped over, never stored or shown.
+const ONE_OFF_SGD = 5000;
+const MONTHS3 = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const CURRENCY = /\b(SGD|USD|EUR|GBP|AUD|HKD|JPY|CNY|CHF|CAD|NZD)\b/;
+// Amounts such as 1,234.56, also with a stray space before the decimals ("109,862 .01").
+const AMOUNT = /(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d+)\s?\.\s?(\d{2})(?!\d|\s?%)/g;
+const DAY_MON_YEAR = '(\\d{1,2})\\s?([A-Za-z]{3,9})\\.?,?\\s?(\\d{4})';
+const PERIOD = new RegExp(`${DAY_MON_YEAR}\\s*(?:-|–|to)\\s*${DAY_MON_YEAR}`, 'i');
+const PERIOD_NUM = /(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(?:-|–|to)\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
+const TX_DATE = /^(\d{1,2})\s?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|^(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/i;
+const nf2 = new Intl.NumberFormat('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const cur2 = (v, c) => (v < 0 ? '−' : '') + sym(c) + nf2.format(Math.abs(v));
+const cents = (v) => Math.round(v * 100) / 100;
+// Long runs of digits (account and reference numbers) are hidden wherever statement text is shown.
+const scrub = (s) => s.replace(/\d[\d\s-]{4,}\d/g, (m) => (m.replace(/\D/g, '').length >= 6 ? '…' : m)).replace(/\s+/g, ' ').trim();
+const isoDate = (y, m, d) => (m >= 1 && m <= 12 && d >= 1 && d <= 31 ? `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}` : null);
+const monthIndex = (name) => MONTHS3.indexOf(String(name).slice(0, 3).toLowerCase()) + 1;
+const dayMonth = (iso) => `${+iso.slice(8)} ${MONTH_NAMES[+iso.slice(5, 7) - 1].slice(0, 3)}`;
+
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  return loadPdfJs.p || (loadPdfJs.p = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'js/pdf.min.js';
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/pdf.worker.min.js'; resolve(window.pdfjsLib); };
+    s.onerror = () => { loadPdfJs.p = null; reject(new Error('The PDF reader did not load. Reload the page and try again.')); };
+    document.head.appendChild(s);
+  }));
+}
+
+// Text lines in reading order. Each keeps the right edge of every character, for telling columns apart.
+function textLines(items) {
+  const rows = [];
+  for (const it of [...items].sort((a, b) => b.y - a.y || a.x - b.x)) {
+    const row = rows.at(-1);
+    if (row && Math.abs(row.y - it.y) <= 2.5) row.items.push(it); else rows.push({ y: it.y, items: [it] });
+  }
+  return rows.map((row) => {
+    let raw = '';
+    const right = [];
+    for (const it of row.items.sort((a, b) => a.x - b.x)) {
+      if (raw) { raw += ' '; right.push(it.x); }
+      raw += it.s;
+      for (let i = 0; i < it.s.length; i++) right.push(it.x + it.w);
+    }
+    const amounts = [...raw.matchAll(AMOUNT)].map((m) => ({ v: +(m[1].replace(/,/g, '') + '.' + m[2]), i: m.index, end: m.index + m[0].length, r: right[m.index + m[0].length - 1] }));
+    return { raw, right, amounts, text: raw.replace(/\s+/g, ' ').trim() };
+  });
+}
+
+// pdf.js is configured with isEvalSupported off: pdf.js 3.x is affected by CVE-2024-4367 otherwise.
+async function pdfLines(bytes) {
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: bytes, isEvalSupported: false, disableFontFace: true }).promise;
+  const lines = [];
+  try {
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const { items } = await page.getTextContent();
+      lines.push(...textLines(items.filter((i) => i.str && i.str.trim()).map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width }))));
+      page.cleanup();
+    }
+  } finally { doc.destroy(); }
+  return lines;
+}
+
+const lineWithout = (l) => l.amounts.reduceRight((s, a) => s.slice(0, a.i) + ' ' + s.slice(a.end), l.raw).replace(/\s+/g, ' ').trim();
+const wordRight = (l, re) => { const m = re.exec(l.raw); return m ? l.right[m.index + m[0].length - 1] : null; };
+
+// Reads the period, the summary accounts and each account's transactions from a Citibank Singapore
+// statement, and checks every account adds up. Returns { error } or { start, end, accounts }.
+function readCiti(lines) {
+  const fail = (error) => ({ error });
+  let start = null, end = null;
+  for (const l of lines) {
+    let m = PERIOD.exec(l.text);
+    if (m) { start = isoDate(+m[3], monthIndex(m[2]), +m[1]); end = isoDate(+m[6], monthIndex(m[5]), +m[4]); }
+    else if ((m = PERIOD_NUM.exec(l.text))) { start = isoDate(+m[3], +m[2], +m[1]); end = isoDate(+m[6], +m[5], +m[4]); }
+    if (end) break;
+  }
+  if (!end) return fail('Could not find the statement period. Check this is a Citibank Singapore account statement PDF, not a scan or a credit card statement.');
+
+  const sumStart = lines.findIndex((l) => /^(checking|savings\s*&\s*investments)\b/i.test(l.text));
+  if (sumStart < 0) return fail('Could not find the Checking or Savings & Investments summary in this statement.');
+  const isOpen = (l) => /OPENING BALANCE|BALANCE BROUGHT FORWARD|BALANCE B\/F/i.test(l.text);
+  const firstOpen = lines.findIndex((l, i) => i > sumStart && isOpen(l));
+  const accounts = [];
+  for (let i = sumStart; i < (firstOpen < 0 ? lines.length : firstOpen); i++) {
+    const l = lines[i], c = CURRENCY.exec(l.raw);
+    const bal = c && l.amounts.find((a) => a.i > c.index);
+    if (!bal) continue;
+    const name = l.raw.slice(0, c.index).replace(/\d[\d\s-]*/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!name || /^(total|account|currency|balance)\b/i.test(name)) continue;
+    const same = accounts.find((a) => a.name.toLowerCase() === name.toLowerCase() && a.currency === c[1]);
+    if (same) same.summary = cents(same.summary + bal.v);
+    else accounts.push({ name, currency: c[1], summary: bal.v, txs: [], details: false });
+  }
+  if (!accounts.length) return fail('Could not read any accounts from the Checking or Savings & Investments summary.');
+
+  const named = (l) => accounts.find((a) => l.text.toLowerCase().includes(a.name.toLowerCase()));
+  const yearOf = (mon) => +end.slice(0, 4) - (mon > +end.slice(5, 7) ? 1 : 0);
+  for (let o = (firstOpen < 0 ? lines.length : firstOpen); o < lines.length; o++) {
+    if (!isOpen(lines[o])) continue;
+    let acc = null, hi = o - 1;
+    for (let k = o - 1; k >= Math.max(0, o - 10) && !acc; k--) { acc = named(lines[k]); hi = k; }
+    if (!acc || acc.details) continue;
+    const c = lines.findIndex((l, i) => i > o && /CLOSING BALANCE/i.test(l.text));
+    if (c < 0) return fail(`Could not find the closing balance for ${acc.name}.`);
+    if (!lines[o].amounts.length || !lines[c].amounts.length) return fail(`Could not read the opening or closing balance for ${acc.name}.`);
+    acc.details = true;
+    acc.opening = lines[o].amounts.at(-1).v;
+    acc.closing = lines[c].amounts.at(-1).v;
+
+    let head = null;
+    for (let k = hi; k < c && !head; k++) if (/withdraw|debit/i.test(lines[k].text) && /deposit|credit/i.test(lines[k].text)) head = lines[k];
+    const cols = head && [['d', wordRight(head, /withdrawals?|debits?/i)], ['c', wordRight(head, /deposits?|credits?/i)], ['b', wordRight(head, /balance/i)]].filter(([, r]) => r != null);
+
+    const txs = [];
+    let cur = null;
+    for (let i = o + 1; i < c; i++) {
+      const l = lines[i];
+      if (isOpen(l) || /CARRIED FORWARD|BALANCE C\/F|^TOTAL\b/i.test(l.text) || (/withdraw|debit/i.test(l.text) && /balance/i.test(l.text))) { cur = null; continue; }
+      const d = TX_DATE.exec(l.text);
+      if (d) {
+        const mon = d[2] ? monthIndex(d[2]) : +d[4], day = +(d[1] || d[3]);
+        cur = { date: isoDate(yearOf(mon), mon, day), desc: lineWithout(l).replace(TX_DATE, ''), amounts: [...l.amounts] };
+        txs.push(cur);
+      } else if (l.amounts.length) {
+        if (cur && !cur.amounts.length) { cur.amounts.push(...l.amounts); cur.desc += ' ' + lineWithout(l); }
+        else { cur = { date: cur ? cur.date : start, desc: lineWithout(l), amounts: [...l.amounts] }; txs.push(cur); }
+      } else if (cur) cur.desc += ' ' + l.text;
+    }
+
+    let run = acc.opening, debits = 0, credits = 0;
+    for (const t of txs.filter((x) => x.amounts.length)) {
+      let amt = null, side = null, printed = null;
+      if (cols && cols.some(([k]) => k === 'd') && cols.some(([k]) => k === 'c')) {
+        for (const a of t.amounts) {
+          const k = [...cols].sort((x, y) => Math.abs(a.r - x[1]) - Math.abs(a.r - y[1]))[0][0];
+          if (k === 'b') printed = a.v; else if (amt == null) { amt = a.v; side = k; }
+        }
+      }
+      if (amt == null && t.amounts.length >= 2) {
+        amt = t.amounts[0].v; printed = t.amounts.at(-1).v;
+        side = printed >= run ? 'c' : 'd';
+      }
+      if (amt == null) return fail(`Could not tell whether a ${t.date ? dayMonth(t.date) : ''} line in ${acc.name} was a withdrawal or a deposit.`);
+      if (side === 'c') credits += amt; else debits += amt;
+      run = cents(run + (side === 'c' ? amt : -amt));
+      if (printed != null && Math.abs(printed - run) > 0.005) return fail(`${acc.name}: the running balance on ${t.date ? dayMonth(t.date) : 'a line'} is ${cur2(printed, acc.currency)}, but the lines before it add up to ${cur2(run, acc.currency)}. Nothing was filled.`);
+      acc.txs.push({ date: t.date, desc: t.desc.replace(/\s+/g, ' ').trim(), signed: side === 'c' ? amt : -amt, balance: run });
+    }
+    const worked = cents(acc.opening - debits + credits);
+    if (Math.abs(worked - acc.closing) > 0.005) return fail(`${acc.name} doesn't add up: opening ${cur2(acc.opening, acc.currency)} − withdrawals ${cur2(debits, acc.currency)} + deposits ${cur2(credits, acc.currency)} = ${cur2(worked, acc.currency)}, but the closing balance is ${cur2(acc.closing, acc.currency)}. Nothing was filled.`);
+    if (Math.abs(acc.closing - acc.summary) > 0.005) return fail(`${acc.name}: the closing balance ${cur2(acc.closing, acc.currency)} doesn't match the summary's ${cur2(acc.summary, acc.currency)}. Nothing was filled.`);
+  }
+  for (const a of accounts) if (!a.details) a.closing = a.summary;
+  return { start, end, accounts };
+}
+
+// The Citibank cash item for a statement account: same currency, and a deposit only for a deposit.
+function citiItem(acc) {
+  const pool = data.items.filter((i) => i.category === 'cash' && i.kind === 'balance' && i.currency === acc.currency && /citi/i.test(i.source || ''));
+  const dep = /deposit/i.test(acc.name);
+  const one = (list) => { const on = list.filter((i) => i.active); return on.length === 1 ? on[0] : list.length === 1 ? list[0] : null; };
+  return one(pool.filter((i) => /deposit/i.test(i.name) === dep)) || one(pool);
+}
+
+let citi = null;
+async function importCiti(bytes) {
+  if (dirty) return showCiti({ error: `You have unsaved changes to ${monthLong(draft.month)}. Save them, or reload the page to discard them, then import again.` });
+  showCiti({ busy: true });
+  let r;
+  try { r = readCiti(await pdfLines(bytes)); }
+  catch (e) { r = { error: `Could not read that PDF (${e && e.message ? e.message : e}). Check it's the statement PDF downloaded from Citibank.` }; }
+  if (r.error) return showCiti(r);
+  const month = r.end.slice(0, 7);
+  if (month <= FROZEN_UNTIL) return showCiti({ error: `This statement ends in ${monthLong(month)}, inside the imported history, which isn't changed. Import a later statement.` });
+
+  startDraft(month);
+  const notes = [], fills = new Map();
+  const savings = r.accounts.find((a) => /interestplus/i.test(a.name)) || r.accounts.find((a) => a.currency === 'SGD' && !/deposit/i.test(a.name));
+  const pay = savings && [...savings.txs].reverse().find((t) => t.signed > 0 && /SALARY\s*PAYMENT/i.test(t.desc));
+  for (const a of r.accounts) {
+    a.value = a === savings && pay ? pay.balance : a.closing;
+    a.used = a === savings && pay ? `${cur2(a.value, a.currency)} after salary on ${dayMonth(pay.date)}` : cur2(a.value, a.currency) + (a.details ? '' : ' (summary; no transactions listed)');
+    a.item = a.currency === 'SGD' || a.currency === 'USD' ? citiItem(a) : null;
+    if (!a.item) { notes.push(`Couldn't match ${a.name} (${a.currency}) to a Citibank cash item, so it was left as it was.`); continue; }
+    fills.set(a.item.id, cents((fills.get(a.item.id) || 0) + a.value));
+  }
+  if (savings && !pay) notes.push(`No SALARY PAYMENT credit in ${savings.name}, so it used the closing balance and left salary as it was.`);
+  for (const [id, v] of fills) {
+    const e = draft.entries[id] || (draft.entries[id] = [null, null]);
+    e[0] = v;
+    imported.add(`e.${id}.0`);
+  }
+  if (pay) { draft.salary = pay.signed; imported.add('m.salary'); }
+
+  const big = [];
+  for (const a of r.accounts) for (const t of a.txs) {
+    if (t === pay) continue;
+    const sgd = a.currency === 'USD' ? t.signed / draft.fx : a.currency === 'SGD' ? t.signed : null;
+    if (sgd != null && Math.abs(sgd) >= ONE_OFF_SGD) big.push({ date: t.date, account: a.name, currency: a.currency, signed: t.signed, sgd: cents(sgd), desc: scrub(t.desc), label: scrub(t.desc).slice(0, 60), on: false });
+  }
+  citi = { ...r, month, notes, pay, savings, big, keep: { other_flow: draft.other_flow, note: draft.note } };
+  dirty = true;
+  renderForm(); renderSummary();
+  showCiti(citi);
+}
+
+function applyOneOffs() {
+  const on = citi.big.filter((b) => b.on);
+  draft.other_flow = on.length ? cents(on.reduce((t, b) => t + b.sgd, 0)) : citi.keep.other_flow;
+  draft.note = on.length ? on.map((b) => b.label.trim() || b.desc).join('; ') : citi.keep.note;
+  for (const k of ['m.other_flow', 'note']) if (on.length) imported.add(k); else imported.delete(k);
+  renderForm(); renderSummary();
+}
+
+function showCiti(r) {
+  const el = $('citi');
+  el.hidden = false;
+  el.classList.toggle('error', !!r.error);
+  if (r.busy) { el.innerHTML = '<p>Reading the statement in this browser…</p>'; return; }
+  const close = '<p class="actions"><button class="btn" type="button" data-citi="close">Close</button></p>';
+  if (r.error) { el.innerHTML = `<h2>Statement not imported</h2><p class="err">${esc(r.error)}</p>${close}`; return; }
+  const period = r.start ? `${dayMonth(r.start)} to ${dayMonth(r.end)} ${r.end.slice(0, 4)}` : `to ${dayMonth(r.end)} ${r.end.slice(0, 4)}`;
+  const accounts = r.accounts.map((a) => `<tr><td class="desc">${esc(a.name)}</td><td>${a.currency}</td><td>${cur2(a.closing, a.currency)}</td><td>${esc(a.used)}</td><td class="desc">${a.item ? esc(a.item.name) : '<span class="muted">not filled</span>'}</td></tr>`).join('');
+  const big = r.big.length
+    ? `<h3>Movements of S$${nf0.format(ONE_OFF_SGD)} or more</h3>
+      <p>Tick any that are one-offs, and edit the label if you like. Ticked ones are added up into "One-off in (+) or out (−)", with their labels in "What it was".</p>
+      <div class="scroll"><table><tr><th>One-off</th><th>Date</th><th class="desc">Account</th><th class="desc">Description</th><th>Amount</th><th class="desc">Label</th></tr>${r.big.map((b, i) => `<tr>
+        <td><input type="checkbox" data-big="${i}" ${b.on ? 'checked' : ''} aria-label="Count as a one-off"></td><td>${dayMonth(b.date)}</td><td class="desc">${esc(b.account)}</td><td class="desc">${esc(b.desc)}</td>
+        <td>${cur2(b.signed, b.currency)}${b.currency === 'SGD' ? '' : ` <span class="muted">${cur2(b.sgd, 'SGD')}</span>`}</td>
+        <td class="label"><input data-label="${i}" value="${esc(b.label)}" aria-label="Label" ${b.on ? '' : 'disabled'}></td></tr>`).join('')}</table></div>`
+    : `<p>No other movements of S$${nf0.format(ONE_OFF_SGD)} or more.</p>`;
+  el.innerHTML = `<h2>Citi statement, ${period}</h2>
+    <p>Filled ${monthLong(r.month)}${exists ? ', which was already saved; saving replaces it' : ''}. Check the highlighted fields, then save. Nothing is saved until you do.</p>
+    ${r.pay ? `<p>Salary ${cur2(r.pay.signed, 'SGD')} on ${dayMonth(r.pay.date)}, filled in.</p>` : ''}
+    ${r.notes.map((n) => `<p class="err">${esc(n)}</p>`).join('')}
+    <div class="scroll"><table><tr><th class="desc">Account</th><th>Currency</th><th>Closing balance</th><th>Filled in</th><th class="desc">Into</th></tr>${accounts}</table></div>
+    ${big}${close}`;
+}
+
+$('citi-btn').onclick = () => $('citi-file').click();
+$('citi-file').onchange = async (ev) => {
+  const f = ev.target.files[0];
+  ev.target.value = '';
+  if (f) await importCiti(new Uint8Array(await f.arrayBuffer()));
+};
+$('citi').addEventListener('click', (ev) => { if (ev.target.dataset.citi === 'close') $('citi').hidden = true; });
+$('citi').addEventListener('change', (ev) => {
+  const i = ev.target.dataset.big;
+  if (i == null || !citi) return;
+  citi.big[+i].on = ev.target.checked;
+  $('citi').querySelector(`[data-label="${i}"]`).disabled = !ev.target.checked;
+  applyOneOffs();
+});
+$('citi').addEventListener('input', (ev) => {
+  const i = ev.target.dataset.label;
+  if (i == null || !citi) return;
+  citi.big[+i].label = ev.target.value;
+  applyOneOffs();
+});
 
 // ---------- accounts and holdings ----------
 function renderItems() {
