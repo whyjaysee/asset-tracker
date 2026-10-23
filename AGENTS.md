@@ -14,7 +14,7 @@ backed by Supabase. Read this before changing anything.
   the last release with a UMD build). They're vendored on purpose so the site loads nothing from
   other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
   `isEvalSupported: false`.
-- **Database changes go in a new numbered file** in `supabase/` (next is `005_...sql`), written
+- **Database changes go in a new numbered file** in `supabase/` (next is `006_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
   or rewritten. Change how things are shown, not the stored past.
@@ -29,6 +29,7 @@ backed by Supabase. Read this before changing anything.
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
+| `supabase/005_owed.sql` | Money owed back table, `nw_save_owed`, `nw_delete_owed`, and `nw_load` with owed |
 | `docs/portfolio-analysis-prompt.md` | Prompt for a separate, read-only analysis chat. Keep its table descriptions in step with any schema change |
 | `.github/workflows/keep-alive.yml` | Pings `nw_ping()` twice a week so the free project doesn't pause |
 
@@ -48,6 +49,19 @@ backed by Supabase. Read this before changing anything.
   (`item_id`, an `nw_items` row of kind holding: one asset at one account). `units` are signed
   (negative for sell, transfer_out, fee); `amount` and `fee` are in the holding's currency. A
   transfer between holdings is a transfer_out and transfer_in pair sharing a `transfer_id`.
+
+- `nw_owed`: money owed back. One row per payment made that will be given back (positive `amount`,
+  S$) or repayment (negative), on a cash balance item such as "House payments to be repaid".
+
+## Money owed back
+House payments (and anything else paid out that will be given back) go in `nw_owed`, not as
+one-offs. The cash item they belong to is worth payments minus repayments up to the month's last
+day (`owedAt()`); the Update form shows it read-only, like tracked units, so bank cash can swing
+without changing net worth or the inferred spending. The Activity tab's "Money owed back to you"
+section adds and deletes records; a separate Claude chat may add them too through
+`nw_save_owed`, as `docs/portfolio-analysis-prompt.md` describes (those show as "added outside
+the site"). Without `item_id`, `nw_save_owed` uses the one item with records, or the one active
+cash item whose name says "repaid". It refuses repaying more than is owed.
 
 ## Positions and movements
 Investments are moving from monthly totals to positions. Until there are any movements, the
@@ -94,7 +108,7 @@ The browser never touches tables. It calls these RPC functions through supabase-
 `nw_load()`, `nw_save_month(d jsonb)`, `nw_delete_month(m text)`, `nw_save_item(d jsonb)`,
 `nw_save_movements(d jsonb)` (a list, saved all or nothing), `nw_delete_movement(m_id bigint)`,
 `nw_setup_holdings(d jsonb)` (the one-time start: creates holdings, their opening balances and
-switches off the totals they replace, all or nothing).
+switches off the totals they replace, all or nothing), `nw_save_owed(d jsonb)`, `nw_delete_owed(o_id bigint)`.
 Each is `SECURITY DEFINER` and starts with `nw_require_member()`, which allows a signed-in user
 only if their email is in `nw_members`. Each returns the full dataset (same shape as `nw_load`),
 which the page re-renders from. Keep that contract: any new write function must call
@@ -102,6 +116,8 @@ which the page re-renders from. Keep that contract: any new write function must 
 
 `nw_load()` returns `{ me, members, items, months: [{ month, fx, salary, ..., entries: { item_id: [amount, price] } }], movements: [{ id, date, item_id, type, units, amount, fee, note, transfer_id, created_by }] }`.
 `movements` is missing until `004_movements.sql` has been run; the Activity tab then says so.
+`owed: [{ id, date, item_id, amount, note, created_by }]` is added by `005_owed.sql`; until then
+the "Money owed back to you" section stays hidden.
 
 ## Calculations (all in `compute()` in app.js; nothing derived is stored)
 - Value in SGD: amount (x price for holdings), divided by `fx` if USD.

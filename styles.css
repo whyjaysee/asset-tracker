@@ -245,6 +245,10 @@ select.pick { background: var(--field); border: 1px solid var(--line); border-ra
 #act-list td.note { text-align: left; color: var(--ink-2); white-space: normal; min-width: 120px; }
 #act-list button { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 0; text-decoration: underline; font-size: 13px; }
 #act-list button[data-armed] { color: var(--down); }
+#owed-list td.note { text-align: left; color: var(--ink-2); white-space: normal; min-width: 120px; }
+#owed-list td:nth-child(2), #owed-list th:nth-child(2) { text-align: left; }
+#owed-list button { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 0; text-decoration: underline; font-size: 13px; }
+#owed-list button[data-armed] { color: var(--down); }
 
 #status { max-width: 1120px; margin: 12px auto 0; padding-inline: 24px; }
 #status .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 10px 14px; color: var(--ink-2); }

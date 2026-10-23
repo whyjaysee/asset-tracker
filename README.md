@@ -84,6 +84,10 @@ site show "The database is not answering".
 In Supabase, SQL Editor, paste `supabase/004_movements.sql` and run it. It adds the movements
 table and functions and changes nothing already stored. Running it again is harmless.
 
+### 8. Turn on money owed back
+Run `supabase/005_owed.sql` the same way. It adds the table for payments that will be given
+back (such as the house payments) and their repayments.
+
 ## Working on the code
 Clone the repository and open the folder in Cursor (or any editor). `AGENTS.md` explains how the
 app fits together; Cursor and Claude read it automatically.
@@ -101,6 +105,7 @@ The local copy uses the live database. Push to `main` to publish.
 - Import Citi statement (Update tab): pick the month's Citibank statement PDF. It's read in your browser and never uploaded. It fills the SGD account (the balance right after your salary), the USD account, the fixed deposit and your salary for the month the statement ends in, and lists movements of S$5,000 or more so you can tick any one-offs. Check the highlighted fields, then save. If a statement doesn't add up, nothing is filled.
 - Sync from Saxo (Update tab): sign in on Saxo's page and you come back with your Saxo prices, cash and (for holdings not tracked on the Activity tab) units filled in for the month on screen. They're today's figures, so sync at the end of the month. Before the holdings set-up it fills the Stock positions total and can copy your positions into the set-up form.
 - Activity: the first time, fill in "Your holdings today": one row per asset per account with the units held, and tick the old totals they replace. Save any month before the set-up date on the Update tab first. After that, record each buy, sell, transfer between accounts, RSU vest or reward as it happens. For any holding with movements, the Update tab fills in its units for you; you only enter the price.
+- Money owed back (Activity tab): add each house payment that will be given back, and each repayment. "House payments to be repaid" on the Update tab is worked out from them, so the bank balance can swing without changing net worth or spending. You can also ask the Claude chat from `docs/portfolio-analysis-prompt.md` to record them; it confirms with you first.
 - The header shows who saved the latest month and when.
 
 ## Security

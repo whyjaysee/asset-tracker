@@ -131,6 +131,29 @@
     <div class="scroll"><table id="act-list"></table></div>
     </div>
   </div>
+  <section id="owed-sec" hidden>
+    <h2 class="acttitle">Money owed back to you</h2>
+    <p class="hint">Payments you make that will be given back, such as the house payments, and each repayment. The line they belong to on the Update tab is worked out from these.</p>
+    <div class="layout">
+      <form id="owed-form" autocomplete="off" novalidate>
+        <fieldset>
+          <legend>Add a payment or repayment</legend>
+          <div class="row"><label for="owed-kind">What happened</label><select id="owed-kind" class="span2 pick"><option value="paid">I paid it (owed back to me)</option><option value="repaid">It was given back to me</option></select></div>
+          <div class="row"><label for="owed-date">Date</label><div class="field span2"><input type="date" id="owed-date" aria-label="Date"></div></div>
+          <div class="row"><label for="owed-item">Line</label><select id="owed-item" class="span2 pick"></select></div>
+          <div class="row"><label for="owed-amount">Amount</label><div class="field span2"><span>S$</span><input inputmode="decimal" id="owed-amount" aria-label="Amount"></div></div>
+          <div class="row"><label for="owed-note">Note</label><div class="field text span2"><input id="owed-note" placeholder="e.g. 4% option to purchase" aria-label="Note"></div></div>
+          <button class="btn primary" id="owed-add" type="submit">Add</button>
+        </fieldset>
+      </form>
+      <aside class="summary">
+        <div class="muted">Still owed back today</div>
+        <dl class="flow" id="owed-now"></dl>
+      </aside>
+    </div>
+    <p class="hint" id="owed-none">Nothing recorded yet.</p>
+    <div class="scroll"><table id="owed-list"></table></div>
+  </section>
 </div>
 <div id="page-update" hidden>
   <div class="updatehead">

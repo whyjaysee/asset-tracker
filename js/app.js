@@ -82,6 +82,12 @@ function unitsAt(d, itemId, day) {
   for (const v of d.movements || []) if (v.item_id === itemId && v.date <= day) u = (u || 0) + Number(v.units);
   return u == null ? null : Math.round(u * 1e10) / 1e10;
 }
+// Money owed back (supabase/005_owed.sql): a cash line's value is payments minus repayments so far.
+function owedAt(d, itemId, day) {
+  let v = null;
+  for (const o of d.owed || []) if (o.item_id === itemId && o.date <= day) v = (v || 0) + Number(o.amount);
+  return v == null ? null : Math.round(v * 100) / 100;
+}
 
 function toast(text, isError) {
   let t = document.getElementById('toast');
@@ -111,6 +117,8 @@ const api = {
   saveMovements(list) { return this.rpc('nw_save_movements', { d: list }); },
   deleteMovement(id) { return this.rpc('nw_delete_movement', { m_id: id }); },
   setupHoldings(d) { return this.rpc('nw_setup_holdings', { d }); },
+  saveOwed(d) { return this.rpc('nw_save_owed', { d }); },
+  deleteOwed(id) { return this.rpc('nw_delete_owed', { o_id: id }); },
 };
 function memberName(email) {
   const m = api.data && (api.data.members || []).find((x) => x.email === email);
@@ -493,7 +501,7 @@ function applyTracked() {
   const differs = [];
   if (draft.month <= FROZEN_UNTIL) return differs;
   for (const it of data.items) {
-    const u = it.kind === 'holding' ? unitsAt(data, it.id, monthEnd(draft.month)) : null;
+    const u = (it.kind === 'holding' ? unitsAt : owedAt)(data, it.id, monthEnd(draft.month));
     if (u == null) continue;
     tracked.add(it.id);
     const e = draft.entries[it.id] || (draft.entries[it.id] = [null, null]);
@@ -540,7 +548,9 @@ function renderForm() {
           names.push(`${it.name} units`);
         }
       } else {
-        const r = row(`${dot}${esc(it.name)}`, field(`e.${it.id}.0`, e[0], sym(it.currency), it.name, 'span2'), b ? 'was ' + plain(b[0], 0) : '');
+        const r = tracked.has(it.id)
+          ? row(`${dot}${esc(it.name)}`, `<div class="field quiet span2"><span>${sym(it.currency)}</span><input value="${plain(e[0])}" readonly aria-label="${esc(it.name)}, from Activity"></div>`, 'from Activity')
+          : row(`${dot}${esc(it.name)}`, field(`e.${it.id}.0`, e[0], sym(it.currency), it.name, 'span2'), b ? 'was ' + plain(b[0], 0) : '');
         (it.monthly ? now : carried).push(r);
         if (!it.monthly) names.push(it.name);
       }
@@ -1284,6 +1294,7 @@ async function saveSetup() {
 
 let activityWired = false;
 function showActivity(d) {
+  renderOwed(d);
   const on = Array.isArray(d.movements);
   $('act-off').hidden = on;
   $('act-body').hidden = !on;
@@ -1367,6 +1378,70 @@ async function deleteMovement(ev) {
   } catch (e) { toast(saveError(e), true); }
 }
 
+// ---------- money owed back: payments that will be given back, and the repayments ----------
+const owedLines = (d) => d.items.filter((i) => i.category === 'cash' && i.kind === 'balance' && (i.active || (d.owed || []).some((o) => o.item_id === i.id)));
+const sgd2 = (v) => (v < 0 ? '−' : '') + 'S$' + nf2.format(Math.abs(v));
+let owedWired = false;
+
+function renderOwed(d) {
+  const on = Array.isArray(d.owed);
+  $('owed-sec').hidden = !on;
+  if (!on) return;
+  if (!owedWired) {
+    owedWired = true;
+    $('owed-date').value = isoDay(new Date());
+    $('owed-form').addEventListener('submit', addOwed);
+    $('owed-list').addEventListener('click', deleteOwed);
+  }
+  const lines = owedLines(d), withRecords = [...new Set(d.owed.map((o) => o.item_id))];
+  const name = (id) => (d.items.find((i) => i.id === id) || { name: id }).name;
+  const el = $('owed-item'), was = el.value;
+  const pick = lines.find((i) => withRecords.includes(i.id)) || lines.find((i) => /repaid/i.test(i.name)) || lines[0];
+  el.innerHTML = lines.map((i) => `<option value="${esc(i.id)}">${esc(i.name)}</option>`).join('');
+  el.value = lines.some((i) => i.id === was) ? was : pick ? pick.id : '';
+  $('owed-now').innerHTML = withRecords.length
+    ? withRecords.map((id) => `<div><dt>${esc(name(id))}</dt><dd>${sgd2(owedAt(d, id, '9999-12-31'))}</dd></div>`).join('')
+    : '<div><dt>Nothing owed back.</dt><dd></dd></div>';
+  const run = {};
+  const rowsHtml = d.owed.map((o) => {
+    run[o.item_id] = (run[o.item_id] || 0) + Number(o.amount);
+    const v = Number(o.amount);
+    return `<tr><td>${esc(o.date)}</td><td>${v > 0 ? 'Paid' : 'Given back'}${withRecords.length > 1 ? ` <span class="muted">${esc(name(o.item_id))}</span>` : ''}</td>
+      <td>${v > 0 ? '+' : '−'}${sgd2(Math.abs(v))}</td><td>${sgd2(run[o.item_id])}</td>
+      <td class="note">${esc(o.note)}${o.created_by === 'dashboard' ? ' <span class="muted">(added outside the site)</span>' : ''}</td>
+      <td><button type="button" data-del="${o.id}">Delete</button></td></tr>`;
+  }).reverse();
+  $('owed-none').hidden = d.owed.length > 0;
+  $('owed-list').innerHTML = d.owed.length ? '<tr><th>Date</th><th>What</th><th>Amount</th><th>Still owed after</th><th>Note</th><th></th></tr>' + rowsHtml.join('') : '';
+}
+
+async function addOwed(ev) {
+  ev.preventDefault();
+  const kind = $('owed-kind').value, date = $('owed-date').value, item = $('owed-item').value, amount = parse($('owed-amount').value);
+  if (!item) return toast('Add a cash line for it first, under Update, Accounts and holdings, as a single amount in SGD.', true);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Enter the date it happened.', true);
+  if (!(amount > 0)) return toast('Enter the amount, more than zero.', true);
+  $('owed-add').disabled = true;
+  try {
+    await api.saveOwed({ date, kind, amount, item_id: item, note: $('owed-note').value.trim() });
+    $('owed-amount').value = $('owed-note').value = '';
+    toast('Added');
+    renderOwed(api.data);
+  } catch (e) { toast(saveError(e), true); }
+  $('owed-add').disabled = false;
+}
+
+async function deleteOwed(ev) {
+  const b = ev.target.closest('button[data-del]');
+  if (!b) return;
+  if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+  try {
+    await api.deleteOwed(+b.dataset.del);
+    toast('Deleted');
+    renderOwed(api.data);
+  } catch (e) { toast(saveError(e), true); renderOwed(api.data); }
+}
+
 // ---------- tabs and start-up ----------
 const TABS = { overview: showOverview, activity: showActivity, update: showUpdate };
 let stale = { overview: true, activity: true, update: true };
@@ -1393,7 +1468,7 @@ const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a)
   noteFresh();
   return d;
 }; };
-['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings'].forEach(wrap);
+['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings', 'saveOwed', 'deleteOwed'].forEach(wrap);
 function noteFresh() { const m = api.data && api.data.months.at(-1); $('sync').textContent = m && m.updated_by && m.updated_by !== 'dashboard' ? 'Last saved by ' + memberName(m.updated_by) + (m.updated_at ? ', ' + clock(m.updated_at) : '') : ''; }
 
 
