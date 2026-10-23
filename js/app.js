@@ -70,6 +70,17 @@ function compute(data) {
   });
 }
 
+// Once a holding has movements (supabase/004_movements.sql), its units come from them.
+// Months up to FROZEN_UNTIL are the imported history and keep their stored units.
+const FROZEN_UNTIL = '2026-08';
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const monthEnd = (m) => isoDay(new Date(+m.slice(0, 4), +m.slice(5), 0));
+function unitsAt(d, itemId, day) {
+  let u = null;
+  for (const v of d.movements || []) if (v.item_id === itemId && v.date <= day) u = (u || 0) + Number(v.units);
+  return u == null ? null : Math.round(u * 1e10) / 1e10;
+}
+
 function toast(text, isError) {
   let t = document.getElementById('toast');
   if (!t) { t = document.createElement('div'); t.id = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
@@ -95,6 +106,9 @@ const api = {
   saveMonth(m) { return this.rpc('nw_save_month', { d: m }); },
   deleteMonth(m) { return this.rpc('nw_delete_month', { m }); },
   saveItem(d) { return this.rpc('nw_save_item', { d }); },
+  saveMovements(list) { return this.rpc('nw_save_movements', { d: list }); },
+  deleteMovement(id) { return this.rpc('nw_delete_movement', { m_id: id }); },
+  setupHoldings(d) { return this.rpc('nw_setup_holdings', { d }); },
 };
 function memberName(email) {
   const m = api.data && (api.data.members || []).find((x) => x.email === email);
@@ -381,7 +395,7 @@ function showOverview(d) {
   renderControls(); renderMonth(); renderHistory(); buildChart();
 }
 
-let data = null, draft = null, base = null, exists = false, dirty = false;
+let data = null, draft = null, base = null, exists = false, dirty = false, tracked = new Set();
 
 const parse = (s) => { const v = parseFloat(String(s).replace(/[, ]/g, '')); return isNaN(v) ? null : v; };
 const sym = (cur) => (cur === 'USD' ? 'US$' : 'S$');
@@ -394,17 +408,37 @@ function startDraft(month) {
     draft = JSON.parse(JSON.stringify(found));
   } else {
     const src = base || { fx: 0.78, salary: 0, entries: {} };
-    draft = { month, fx: src.fx, salary: src.salary, bonus: 0, stock_added: 0, crypto_added: 0, other_flow: 0, note: '', entries: JSON.parse(JSON.stringify(src.entries)) };
+    const active = new Set(data.items.filter((i) => i.active).map((i) => i.id));
+    const entries = Object.fromEntries(Object.entries(src.entries).filter(([id]) => active.has(id)).map(([id, e]) => [id, [...e]]));
+    draft = { month, fx: src.fx, salary: src.salary, bonus: 0, stock_added: 0, crypto_added: 0, other_flow: 0, note: '', entries };
   }
+  const differs = applyTracked();
   $('month').value = month;
   $('title').textContent = monthLong(month);
-  $('hint').textContent = exists
+  $('hint').textContent = (exists
     ? 'Already saved. Change anything and save again.'
-    : base ? `New month, filled in from ${monthLong(base.month)}. Enter the numbers below; everything else carries over.` : 'First month. Fill in what you hold.';
+    : base ? `New month, filled in from ${monthLong(base.month)}. Enter the numbers below; everything else carries over.` : 'First month. Fill in what you hold.')
+    + (differs.length ? ` Units of ${differs.join(', ')} now come from Activity and differ from what was saved; save to update them.` : '');
   $('delete').hidden = !exists;
   $('delete').textContent = 'Delete this month';
   delete $('delete').dataset.armed;
   renderForm(); renderSummary();
+}
+
+// Puts the units worked out from Activity into the draft; returns the names that changed.
+function applyTracked() {
+  tracked = new Set();
+  const differs = [];
+  if (draft.month <= FROZEN_UNTIL) return differs;
+  for (const it of data.items) {
+    const u = it.kind === 'holding' ? unitsAt(data, it.id, monthEnd(draft.month)) : null;
+    if (u == null) continue;
+    tracked.add(it.id);
+    const e = draft.entries[it.id] || (draft.entries[it.id] = [null, null]);
+    if (exists && e[0] !== u) differs.push(it.name);
+    e[0] = u;
+  }
+  return differs;
 }
 
 function field(key, value, prefix, label, cls = '') {
@@ -436,8 +470,12 @@ function renderForm() {
       if (it.kind === 'holding') {
         const price = row(`${dot}${esc(it.name)} price`, field(`e.${it.id}.1`, e[1], sym(it.currency), `${it.name} price`, 'span2'), b ? 'was ' + plain(b[1], 2) : '');
         (it.monthly ? now : carried).push(price);
-        carried.push(row(`${dot}${esc(it.name)} units held`, field(`e.${it.id}.0`, e[0], '', `${it.name} units held`, 'span2'), b ? 'was ' + plain(b[0]) : ''));
-        names.push(`${it.name} units`);
+        if (tracked.has(it.id)) {
+          carried.push(row(`${dot}${esc(it.name)} units held`, `<div class="field quiet span2"><input value="${plain(e[0])}" readonly aria-label="${esc(it.name)} units held, from Activity"></div>`, 'from Activity'));
+        } else {
+          carried.push(row(`${dot}${esc(it.name)} units held`, field(`e.${it.id}.0`, e[0], '', `${it.name} units held`, 'span2'), b ? 'was ' + plain(b[0]) : ''));
+          names.push(`${it.name} units`);
+        }
       } else {
         const r = row(`${dot}${esc(it.name)}`, field(`e.${it.id}.0`, e[0], sym(it.currency), it.name, 'span2'), b ? 'was ' + plain(b[0], 0) : '');
         (it.monthly ? now : carried).push(r);
@@ -562,29 +600,271 @@ $('additem').onclick = async () => {
 const saveError = (e) => (unsure(e) ? 'Could not confirm that. Reload and check before trying again.' : explain(e));
 function showUpdate(d) {
   data = d;
-  if (draft && dirty) { renderSummary(); renderItems(); return; }
+  if (draft && dirty) { applyTracked(); renderForm(); renderSummary(); renderItems(); return; }
   const last = d.months.length ? d.months[d.months.length - 1].month : null;
   const now = new Date(), thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   startDraft(draft ? draft.month : last ? nextMonth(last) : thisMonth);
   renderItems();
 }
 
+// ---------- activity: buys, sells, transfers, vests and rewards ----------
+const MOVE_NAMES = { opening: 'Opening balance', buy: 'Bought', sell: 'Sold', transfer_in: 'Moved in', transfer_out: 'Moved out', vest: 'Vested', reward: 'Reward', fee: 'Fee' };
+const MOVE_FORM = {
+  buy: { amount: 'Total paid', fee: true, need: true, help: 'Units bought and the total paid for them, not counting the fee.' },
+  sell: { amount: 'Total received', fee: true, need: true, help: 'Units sold and the total received for them, before the fee.' },
+  transfer: { help: 'Units that left the first account. If some were lost to a network fee, add that separately as a fee.' },
+  vest: { amount: 'Value when vested', help: 'Units you received, after any shares withheld for tax.' },
+  reward: { amount: 'Value when received', help: 'Staking rewards, airdrops or reinvested dividends. The value is optional.' },
+  fee: { help: 'Units taken as a fee, such as a network fee on a transfer.' },
+  opening: { amount: 'Total cost, if known', help: 'Units already held on the day you start tracking this holding.' },
+};
+const holdingName = (it) => (it.source ? `${it.name} · ${it.source}` : it.name);
+const heldNow = (d, id) => unitsAt(d, id, '9999-12-31');
+
+// The first movement after which a holding would hold less than zero, if any.
+// Same-day additions count before same-day removals.
+function goesNegative(moves) {
+  const run = {};
+  for (const v of [...moves].sort((a, b) => a.date.localeCompare(b.date) || b.units - a.units)) {
+    run[v.item_id] = (run[v.item_id] || 0) + Number(v.units);
+    if (run[v.item_id] < -1e-9) return v;
+  }
+  return null;
+}
+const belowZero = (d, v) => `That would leave ${holdingName(d.items.find((i) => i.id === v.item_id) || { name: v.item_id })} below zero on ${v.date}.`;
+
+function syncActForm() {
+  const d = api.data, t = $('act-type').value, f = MOVE_FORM[t];
+  const it = d.items.find((i) => i.id === $('act-item').value);
+  $('act-itemlabel').textContent = t === 'transfer' ? 'Moved from' : 'Holding';
+  $('act-torow').hidden = t !== 'transfer';
+  $('act-amountrow').hidden = !f.amount;
+  $('act-amountlabel').textContent = f.amount || '';
+  $('act-feerow').hidden = !f.fee;
+  $('act-cur').textContent = $('act-feecur').textContent = it ? sym(it.currency) : '';
+  $('act-help').textContent = f.help;
+  const held = it ? heldNow(d, it.id) : null;
+  $('act-held').textContent = held == null ? '' : `${plain(held)} held now`;
+  const units = parse($('act-units').value), amount = parse($('act-amount').value);
+  $('act-each').textContent = f.amount && units > 0 && amount != null && it ? `${sym(it.currency)}${plain(amount / units, 2)} each` : '';
+}
+
+function renderActivity(d) {
+  const all = d.items.filter((i) => i.kind === 'holding' && (i.active || heldNow(d, i.id)));
+  for (const id of ['act-item', 'act-to']) {
+    const el = $(id), was = el.value;
+    el.innerHTML = all.map((i) => `<option value="${esc(i.id)}">${esc(holdingName(i))}</option>`).join('');
+    if (all.some((i) => i.id === was)) el.value = was;
+  }
+
+  const started = (d.movements || []).length > 0;
+  $('act-setup').hidden = started;
+  $('act-main').hidden = !started;
+  if (!started) renderSetup(d);
+
+  const byId = Object.fromEntries(d.items.map((i) => [i.id, i]));
+  const held = d.items.map((i) => ({ it: i, u: heldNow(d, i.id) })).filter((x) => x.u != null);
+  $('act-positions').innerHTML = held.length
+    ? held.map((x) => `<div><dt><span class="dot" style="--c:var(--${x.it.category})"></span> ${esc(holdingName(x.it))}</dt><dd>${plain(x.u)}</dd></div>`).join('')
+    : '<div><dt>Nothing tracked yet.</dt><dd></dd></div>';
+
+  const moves = d.movements || [];
+  const pair = (v, type) => moves.find((w) => w.transfer_id === v.transfer_id && w.type === type);
+  const rowsHtml = [...moves].reverse().filter((v) => !(v.type === 'transfer_in' && pair(v, 'transfer_out'))).map((v) => {
+    const it = byId[v.item_id] || { name: v.item_id, currency: 'USD', category: 'stocks' };
+    const to = v.type === 'transfer_out' && pair(v, 'transfer_in');
+    const what = to ? 'Moved' : MOVE_NAMES[v.type];
+    const where = to ? `${esc(holdingName(it))} → ${esc(holdingName(byId[to.item_id] || { name: to.item_id }))}` : esc(holdingName(it));
+    const units = to ? plain(Math.abs(v.units)) : (v.units > 0 ? '+' : '−') + plain(Math.abs(v.units));
+    const amount = v.amount == null ? '' : sym(it.currency) + plain(v.amount, 2) + (v.fee ? ` <span class="muted">+ ${plain(v.fee, 2)} fee</span>` : '');
+    return `<tr><td>${esc(v.date)}</td><td>${what}</td><td><span class="dot" style="--c:var(--${it.category})"></span>${where}</td>
+      <td>${units}</td><td>${amount}</td><td class="note">${esc(v.note)}</td><td><button type="button" data-del="${v.id}">Delete</button></td></tr>`;
+  });
+  $('act-none').hidden = moves.length > 0;
+  $('act-list').innerHTML = moves.length ? '<tr><th>Date</th><th>What</th><th>Holding</th><th>Units</th><th>Amount</th><th>Note</th><th></th></tr>' + rowsHtml.join('') : '';
+  syncActForm();
+}
+
+// One-time set-up: every holding held now, entered at once, each saved with an opening balance.
+let setupRows = null, setupOff = null;
+const setupKey = (account, asset) => `${account.trim().toLowerCase()}|${asset.trim().toLowerCase()}`;
+// Starts with a row per account that holds investments, splitting labels such as "Kraken and Ledger".
+function setupStart(d) {
+  const rows = [], seen = new Set();
+  for (const it of d.items.filter((i) => i.active && i.category !== 'cash')) {
+    const accounts = (it.source || '').split(/\s+and\s+|\s*[,&]\s*/).map((s) => s.trim()).filter(Boolean);
+    for (const account of accounts) {
+      const asset = it.kind === 'holding' ? it.name : '';
+      if (seen.has(setupKey(account, asset))) continue;
+      seen.add(setupKey(account, asset));
+      rows.push({ account, asset, cat: it.category, units: '', cost: '' });
+    }
+  }
+  const order = [...new Set(rows.map((r) => r.account))];
+  rows.sort((a, b) => order.indexOf(a.account) - order.indexOf(b.account));
+  return rows.length ? rows : [{ account: '', asset: '', cat: 'stocks', units: '', cost: '' }];
+}
+
+function renderSetup(d) {
+  if (!setupRows) {
+    setupRows = setupStart(d);
+    $('setup-date').value = isoDay(new Date());
+  }
+  const listed = new Set(setupRows.map((r) => setupKey(r.account, r.asset)));
+  const replaceable = d.items.filter((i) => i.active && i.category !== 'cash');
+  if (!setupOff) setupOff = new Set(replaceable.filter((i) => !/cash/i.test(i.name) && !listed.has(setupKey(i.source || '', i.name))).map((i) => i.id));
+  const accounts = [...new Set(setupRows.map((r) => r.account).concat(d.items.filter((i) => i.category !== 'cash').map((i) => i.source)).filter(Boolean))];
+  $('setup-accounts').innerHTML = accounts.map((a) => `<option value="${esc(a)}">`).join('');
+  const cats = CATS.filter((c) => c.id !== 'cash');
+  $('setup-rows').innerHTML = '<tr><th>Account</th><th>Asset</th><th>Group</th><th>Units</th><th>Total cost, US$ (optional)</th><th></th></tr>' + setupRows.map((r, i) => `<tr data-i="${i}">
+    <td><input data-k="account" list="setup-accounts" value="${esc(r.account)}" placeholder="e.g. Saxo" aria-label="Account"></td>
+    <td><input data-k="asset" value="${esc(r.asset)}" placeholder="${r.cat === 'crypto' ? 'e.g. SOL' : 'e.g. VWRA'}" aria-label="Asset"></td>
+    <td><select data-k="cat" aria-label="Group">${cats.map((c) => `<option value="${c.id}" ${r.cat === c.id ? 'selected' : ''}>${c.name}</option>`).join('')}</select></td>
+    <td><input class="num" data-k="units" inputmode="decimal" value="${esc(r.units)}" aria-label="Units"></td>
+    <td><input class="num" data-k="cost" inputmode="decimal" value="${esc(r.cost)}" aria-label="Total cost in US dollars"></td>
+    <td><button type="button" data-remove="${i}" aria-label="Remove this row">×</button></td></tr>`).join('');
+  $('setup-off').innerHTML = replaceable.length
+    ? replaceable.map((i) => `<label><input type="checkbox" data-off="${esc(i.id)}" ${setupOff.has(i.id) ? 'checked' : ''}><span class="dot" style="--c:var(--${i.category})"></span>${esc(holdingName(i))}</label>`).join('')
+    : '<p class="hint">Nothing to switch off.</p>';
+  checkSetup();
+}
+
+const setupFilled = () => setupRows.filter((r) => String(r.units).trim() !== '');
+function checkSetup() {
+  const d = api.data, date = $('setup-date').value, last = d.months.at(-1), filled = setupFilled();
+  const keys = filled.map((r) => setupKey(r.account, r.asset)), twice = filled.find((r, i) => keys.indexOf(keys[i]) !== i);
+  let warn = '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) warn = 'Enter the date these holdings are for.';
+  else if (filled.some((r) => !(parse(r.units) > 0))) warn = 'Units must be numbers above zero.';
+  else if (filled.some((r) => String(r.cost).trim() !== '' && !(parse(r.cost) >= 0))) warn = 'Total cost must be a number, or left empty.';
+  else if (filled.some((r) => !r.account.trim() || !r.asset.trim())) warn = 'Each row with units needs an account and an asset.';
+  else if (twice) warn = `${twice.asset.trim()} at ${twice.account.trim()} is listed twice. Put its units in one row.`;
+  else if (last && setupOff.size && nextMonth(last.month) < date.slice(0, 7)) warn = `Save ${monthLong(nextMonth(last.month))} on the Update tab first. Once the totals are switched off, that month would have neither them nor these holdings.`;
+  $('setup-warn').textContent = warn;
+  $('setup-warn').hidden = !warn;
+  $('setup-save').disabled = !!warn || !filled.length || !api.online;
+  $('setup-save').textContent = filled.length ? `Save ${filled.length} ${filled.length === 1 ? 'holding' : 'holdings'}` : 'Save holdings';
+}
+
+async function saveSetup() {
+  checkSetup();
+  if ($('setup-save').disabled) return;
+  const holdings = setupFilled().map((r) => {
+    const h = { name: r.asset.trim(), source: r.account.trim(), category: r.cat, currency: 'USD', units: parse(r.units) };
+    if (parse(r.cost) != null) h.amount = parse(r.cost);
+    return h;
+  });
+  $('setup-save').disabled = true;
+  try {
+    await api.setupHoldings({ date: $('setup-date').value, holdings, switch_off: [...setupOff] });
+    toast(`Saved ${holdings.length} ${holdings.length === 1 ? 'holding' : 'holdings'}`);
+    setupRows = setupOff = null;
+    renderActivity(api.data);
+  } catch (e) { toast(saveError(e), true); checkSetup(); }
+}
+
+let activityWired = false;
+function showActivity(d) {
+  const on = Array.isArray(d.movements);
+  $('act-off').hidden = on;
+  $('act-body').hidden = !on;
+  if (!on) return;
+  if (!activityWired) {
+    activityWired = true;
+    $('act-date').value = isoDay(new Date());
+    for (const id of ['act-type', 'act-item']) $(id).onchange = syncActForm;
+    $('act-form').addEventListener('input', syncActForm);
+    $('act-form').addEventListener('submit', addMovement);
+    $('setup-rows').addEventListener('input', (ev) => {
+      const tr = ev.target.closest('tr[data-i]');
+      if (!tr || !ev.target.dataset.k) return;
+      setupRows[+tr.dataset.i][ev.target.dataset.k] = ev.target.value;
+      checkSetup();
+    });
+    $('setup-rows').addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-remove]');
+      if (!b) return;
+      setupRows.splice(+b.dataset.remove, 1);
+      renderSetup(api.data);
+    });
+    $('setup-addrow').onclick = () => {
+      setupRows.push({ account: '', asset: '', cat: 'stocks', units: '', cost: '' });
+      renderSetup(api.data);
+      $('setup-rows').querySelector(`tr[data-i="${setupRows.length - 1}"] [data-k="account"]`).focus();
+    };
+    $('setup-off').addEventListener('change', (ev) => {
+      const id = ev.target.dataset.off;
+      if (!id) return;
+      if (ev.target.checked) setupOff.add(id); else setupOff.delete(id);
+      checkSetup();
+    });
+    $('setup-date').addEventListener('input', checkSetup);
+    $('setup-save').onclick = saveSetup;
+    $('act-list').addEventListener('click', deleteMovement);
+  }
+  renderActivity(d);
+}
+
+async function addMovement(ev) {
+  ev.preventDefault();
+  const d = api.data, t = $('act-type').value, f = MOVE_FORM[t], item = $('act-item').value, date = $('act-date').value;
+  const units = parse($('act-units').value), amount = f.amount ? parse($('act-amount').value) : null, fee = f.fee ? parse($('act-fee').value) : null;
+  if (!item) return toast('Add a holding first, under Update, Accounts and holdings.', true);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Enter the date it happened.', true);
+  if (!(units > 0)) return toast('Enter the number of units, more than zero.', true);
+  if (t === 'transfer' && $('act-to').value === item) return toast('Pick a different holding to move it to.', true);
+  if (f.need && amount == null) return toast(`Enter the ${f.amount.toLowerCase()}.`, true);
+  if (['sell', 'transfer', 'fee'].includes(t)) {
+    const had = unitsAt(d, item, date) || 0;
+    if (units > had + 1e-9) return toast(`Only ${plain(had)} were held on ${date}. Check the units and the date.`, true);
+    const later = goesNegative([...(d.movements || []), { item_id: item, date, units: -units }]);
+    if (later) return toast(`${belowZero(d, later)} Check the units and the date.`, true);
+  }
+  const m = { date, type: t, item_id: item, units, note: $('act-note').value.trim() };
+  if (t === 'transfer') m.to_item_id = $('act-to').value;
+  if (amount != null) m.amount = amount;
+  if (fee) m.fee = fee;
+  $('act-add').disabled = true;
+  try {
+    await api.saveMovements([m]);
+    for (const id of ['act-units', 'act-amount', 'act-fee', 'act-note']) $(id).value = '';
+    toast('Added');
+    renderActivity(api.data);
+  } catch (e) { toast(saveError(e), true); }
+  $('act-add').disabled = false;
+}
+
+async function deleteMovement(ev) {
+  const b = ev.target.closest('button[data-del]');
+  if (!b) return;
+  const id = +b.dataset.del, moves = api.data.movements || [], v = moves.find((x) => x.id === id);
+  const left = goesNegative(moves.filter((x) => x.id !== id && !(v && v.transfer_id && x.transfer_id === v.transfer_id)));
+  if (left) return toast(`${belowZero(api.data, left)} Delete the later movement first.`, true);
+  if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+  try {
+    await api.deleteMovement(id);
+    toast('Deleted');
+    renderActivity(api.data);
+  } catch (e) { toast(saveError(e), true); }
+}
+
 // ---------- tabs and start-up ----------
-let stale = { overview: true, update: true };
+const TABS = { overview: showOverview, activity: showActivity, update: showUpdate };
+let stale = { overview: true, activity: true, update: true };
 function showTab(name) {
-  for (const t of ['overview', 'update']) {
+  for (const t of Object.keys(TABS)) {
     $('page-' + t).hidden = t !== name;
     const b = $('tab-' + t);
     if (t === name) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
-  try { history.replaceState(null, '', name === 'update' ? '#update' : '#overview'); } catch {}
-  if (api.data && stale[name]) { stale[name] = false; (name === 'update' ? showUpdate : showOverview)(api.data); }
+  try { history.replaceState(null, '', '#' + name); } catch {}
+  if (api.data && stale[name]) { stale[name] = false; TABS[name](api.data); }
 }
-const currentTab = () => ($('page-update').hidden ? 'overview' : 'update');
-function paint() { stale = { overview: true, update: true }; showTab(currentTab()); }
-// Saves on the Update tab change what the Overview shows.
-const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a) => { const d = await f(...a); stale.overview = true; if (name === 'saveMonth') state.month = a[0].month; noteFresh(); return d; }; };
-['saveMonth', 'deleteMonth', 'saveItem'].forEach(wrap);
+const currentTab = () => Object.keys(TABS).find((t) => !$('page-' + t).hidden) || 'overview';
+function paint() { stale = { overview: true, activity: true, update: true }; showTab(currentTab()); }
+// A save on one tab changes what the others show.
+const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a) => { const d = await f(...a); for (const t in stale) stale[t] = true; stale[currentTab()] = false; if (name === 'saveMonth') state.month = a[0].month; noteFresh(); return d; }; };
+['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings'].forEach(wrap);
 function noteFresh() { const m = api.data && api.data.months.at(-1); $('sync').textContent = m && m.updated_by && m.updated_by !== 'dashboard' ? 'Last saved by ' + memberName(m.updated_by) + (m.updated_at ? ', ' + clock(m.updated_at) : '') : ''; }
 
 
@@ -661,9 +941,8 @@ $('signinform').addEventListener('submit', async (ev) => {
 $('signout').onclick = async () => { await sb.auth.signOut(); api.data = null; location.hash = ''; showSignedOut(); };
 
 (async function start() {
-  $('tab-overview').onclick = () => showTab('overview');
-  $('tab-update').onclick = () => showTab('update');
-  showTab(location.hash === '#update' ? 'update' : 'overview');
+  for (const t of Object.keys(TABS)) $('tab-' + t).onclick = () => showTab(t);
+  showTab(TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   sb.auth.onAuthStateChange((event, session) => {
     if (session && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION')) showSignedIn(session);
     if (event === 'SIGNED_OUT' || (event === 'INITIAL_SESSION' && !session)) showSignedOut();

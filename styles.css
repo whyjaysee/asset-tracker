@@ -177,6 +177,27 @@ details.carried summary .sum { font: 14px var(--body); color: var(--ink-2); marg
 details.carried h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 20px 0 6px; }
 details.carried .hint { margin: 10px 0 12px; }
 
+/* Activity page */
+select.pick { background: var(--field); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+.field input[type='date'] { text-align: left; }
+.setup { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 28px; }
+.setup h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 22px 0 4px; }
+.setup .hint { margin-bottom: 12px; }
+.setup .row { max-width: 520px; }
+#setup-rows th, #setup-rows td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 0; }
+#setup-rows input, #setup-rows select { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; width: 100%; min-width: 90px; }
+#setup-rows input.num { text-align: right; }
+#setup-rows button { border: 0; background: none; color: var(--ink-3); cursor: pointer; font-size: 18px; padding: 0 4px; }
+#setup-off label { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+#setup-off label .dot { display: inline-block; }
+.hint.warn { color: var(--down); }
+.acttitle { margin-top: 36px; }
+#act-positions dt .dot { display: inline-block; margin-right: 6px; }
+#act-list td:nth-child(2), #act-list th:nth-child(2), #act-list td:nth-child(3), #act-list th:nth-child(3) { text-align: left; }
+#act-list td.note { text-align: left; color: var(--ink-2); white-space: normal; min-width: 120px; }
+#act-list button { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 0; text-decoration: underline; font-size: 13px; }
+#act-list button[data-armed] { color: var(--down); }
+
 #status { max-width: 1120px; margin: 12px auto 0; padding-inline: 24px; }
 #status .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 10px 14px; color: var(--ink-2); }
 #status .bar.warn { border-color: var(--rsu); }

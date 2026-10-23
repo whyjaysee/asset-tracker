@@ -18,6 +18,7 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 | `supabase/001_setup.sql` | Not in this repository: it holds the imported history. Already run; keep your copy private |
 | `supabase/002_shared_access.sql` | Sign-in access for household members. Run once (step 1) |
 | `supabase/003_lockdown.sql` | Closes the whole project to the public key. Run before the site goes live (step 1) |
+| `supabase/004_movements.sql` | Turns on the Activity tab: buys, sells, transfers and vests. Run once (step 6) |
 | `.github/workflows/keep-alive.yml` | Stops the free Supabase project pausing (step 4) |
 
 ## Setup
@@ -69,6 +70,10 @@ site show "The database is not answering".
 - If the folder is on GitHub, the included workflow pings it twice a week. Nothing to set up: it starts after the first push. Check the Actions tab once to confirm it ran.
 - Otherwise, when it pauses, open the Supabase dashboard and choose **Restore project** (takes a few minutes).
 
+### 6. Turn on the Activity tab
+In Supabase, SQL Editor, paste `supabase/004_movements.sql` and run it. It adds the movements
+table and functions and changes nothing already stored. Running it again is harmless.
+
 ## Working on the code
 Clone the repository and open the folder in Cursor (or any editor). `AGENTS.md` explains how the
 app fits together; Cursor and Claude read it automatically.
@@ -83,6 +88,7 @@ The local copy uses the live database. Push to `main` to publish.
 - Sign in with your email and password. Let Safari save them to iCloud Keychain and it fills them in with Touch ID or Face ID next time. You stay signed in after that.
 - Optional: once signed in, choose **Add passkey** at the top; after that **Sign in with a passkey** needs no password. Passkeys work only on the live site, not on a local preview.
 - Update: the five numbers that change each month are at the top; everything else is carried over from last month.
+- Activity: the first time, fill in "Your holdings today": one row per asset per account with the units held, and tick the old totals they replace. Save any month before the set-up date on the Update tab first. After that, record each buy, sell, transfer between accounts, RSU vest or reward as it happens. For any holding with movements, the Update tab fills in its units for you; you only enter the price.
 - The header shows who saved the latest month and when.
 
 ## Security

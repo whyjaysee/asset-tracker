@@ -12,7 +12,7 @@
   <span class="name">Net worth</span>
   <span class="sync" id="sync"></span>
   <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="addpasskey" hidden>Add passkey</button><button type="button" id="signout">Sign out</button></span>
-  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-update">Update</button></nav>
+  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-activity">Activity</button><button type="button" id="tab-update">Update</button></nav>
 </header>
 <section class="signin" id="signin" hidden>
   <h1>Net worth</h1>
@@ -73,6 +73,57 @@
     <p><button class="btn" id="csv" type="button">Download as CSV</button></p>
     <div class="scroll"><table id="history"></table></div>
   </details>
+  </div>
+</div>
+<div id="page-activity" hidden>
+  <div class="updatehead"><h1>Activity</h1></div>
+  <p class="hint">Record each buy, sell, transfer, vest or reward as it happens. The units you hold are worked out from these, so on the Update tab you only enter prices.</p>
+  <p class="empty" id="act-off" hidden>Activity is not switched on in the database yet. Run <code>supabase/004_movements.sql</code> in the Supabase SQL Editor, then reload.</p>
+  <div id="act-body" hidden>
+    <section class="setup" id="act-setup" hidden>
+      <h2>Your holdings today</h2>
+      <p class="hint">A one-time start. List what each account holds, one row per asset per account, then save. After that, record changes below as they happen.</p>
+      <div class="row"><label for="setup-date">Held on</label><div class="field span2"><input type="date" id="setup-date" aria-label="Held on"></div></div>
+      <div class="scroll"><table id="setup-rows"></table></div>
+      <datalist id="setup-accounts"></datalist>
+      <p><button class="btn" id="setup-addrow" type="button">Add a row</button></p>
+      <h3>Switch off the totals these replace</h3>
+      <p class="hint">So nothing is counted twice. Months already saved keep them.</p>
+      <div id="setup-off"></div>
+      <p class="hint warn" id="setup-warn" hidden></p>
+      <button class="btn primary" id="setup-save" type="button">Save holdings</button>
+    </section>
+    <div id="act-main">
+    <div class="layout">
+      <form id="act-form" autocomplete="off" novalidate>
+        <fieldset>
+          <legend>Add a movement</legend>
+          <div class="row"><label for="act-type">What happened</label><select id="act-type" class="span2 pick">
+            <option value="buy">Bought</option><option value="sell">Sold</option><option value="transfer">Moved between accounts</option>
+            <option value="vest">RSU vested</option><option value="reward">Reward, dividend or interest paid in units</option>
+            <option value="fee">Fee paid in units</option><option value="opening">Opening balance</option>
+          </select></div>
+          <div class="row"><label for="act-date">Date</label><div class="field span2"><input type="date" id="act-date" aria-label="Date"></div></div>
+          <div class="row"><label for="act-item" id="act-itemlabel">Holding</label><select id="act-item" class="span2 pick"></select></div>
+          <div class="row" id="act-torow" hidden><label for="act-to">Moved to</label><select id="act-to" class="span2 pick"></select></div>
+          <div class="row"><label for="act-units">Units</label><div class="field span2"><input inputmode="decimal" id="act-units" aria-label="Units"></div><span class="was" id="act-held"></span></div>
+          <div class="row" id="act-amountrow"><label for="act-amount" id="act-amountlabel">Total paid</label><div class="field span2"><span id="act-cur"></span><input inputmode="decimal" id="act-amount" aria-label="Amount"></div><span class="was" id="act-each"></span></div>
+          <div class="row" id="act-feerow"><label for="act-fee">Fee</label><div class="field span2"><span id="act-feecur"></span><input inputmode="decimal" id="act-fee" aria-label="Fee"></div></div>
+          <div class="row"><label for="act-note">Note</label><div class="field text span2"><input id="act-note" placeholder="optional" aria-label="Note"></div></div>
+          <p class="hint" id="act-help"></p>
+          <button class="btn primary" id="act-add" type="submit">Add</button>
+        </fieldset>
+      </form>
+      <aside class="summary">
+        <div class="muted">Units held today</div>
+        <dl class="flow" id="act-positions"></dl>
+        <p class="fine">A new account or asset? Add it under Update, Accounts and holdings, as units × price.</p>
+      </aside>
+    </div>
+    <h2 class="acttitle">Movements</h2>
+    <p class="hint" id="act-none">Nothing recorded yet.</p>
+    <div class="scroll"><table id="act-list"></table></div>
+    </div>
   </div>
 </div>
 <div id="page-update" hidden>
