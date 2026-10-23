@@ -19,7 +19,7 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 | `supabase/001_setup.sql` | Not in this repository: it holds the imported history. Already run; keep your copy private |
 | `supabase/002_shared_access.sql` | Sign-in access for household members. Run once (step 1) |
 | `supabase/003_lockdown.sql` | Closes the whole project to the public key. Run before the site goes live (step 1) |
-| `supabase/004_movements.sql` | Turns on the Activity tab: buys, sells, transfers and vests. Run once (step 6) |
+| `supabase/004_movements.sql` | Turns on the Activity tab: buys, sells, transfers and vests. Run once (step 7) |
 | `.github/workflows/keep-alive.yml` | Stops the free Supabase project pausing (step 4) |
 
 ## Setup
@@ -71,7 +71,16 @@ site show "The database is not answering".
 - If the folder is on GitHub, the included workflow pings it twice a week. Nothing to set up: it starts after the first push. Check the Actions tab once to confirm it ran.
 - Otherwise, when it pauses, open the Supabase dashboard and choose **Restore project** (takes a few minutes).
 
-### 6. Turn on the Activity tab
+### 6. Optional: connect Saxo
+"Sync from Saxo" on the Update tab fills your Saxo positions and cash. To turn it on:
+
+1. In SaxoTraderGO, allow OpenAPI access for your account.
+2. On developer.saxo, create a live application with the PKCE grant type and read access, and add
+   the redirect addresses `https://whyjaysee.github.io/asset-tracker/` and `http://localhost:5500/`.
+3. Put its app key in `js/config.js` as `saxoAppKey` and push. The app key is public by design;
+   there's no secret.
+
+### 7. Turn on the Activity tab
 In Supabase, SQL Editor, paste `supabase/004_movements.sql` and run it. It adds the movements
 table and functions and changes nothing already stored. Running it again is harmless.
 
@@ -90,6 +99,7 @@ The local copy uses the live database. Push to `main` to publish.
 - Optional: once signed in, choose **Add passkey** at the top; after that **Sign in with a passkey** needs no password. Passkeys work only on the live site, not on a local preview.
 - Update: the five numbers that change each month are at the top; everything else is carried over from last month.
 - Import Citi statement (Update tab): pick the month's Citibank statement PDF. It's read in your browser and never uploaded. It fills the SGD account (the balance right after your salary), the USD account, the fixed deposit and your salary for the month the statement ends in, and lists movements of S$5,000 or more so you can tick any one-offs. Check the highlighted fields, then save. If a statement doesn't add up, nothing is filled.
+- Sync from Saxo (Update tab): sign in on Saxo's page and you come back with your Saxo prices, cash and (for holdings not tracked on the Activity tab) units filled in for the month on screen. They're today's figures, so sync at the end of the month. Before the holdings set-up it fills the Stock positions total and can copy your positions into the set-up form.
 - Activity: the first time, fill in "Your holdings today": one row per asset per account with the units held, and tick the old totals they replace. Save any month before the set-up date on the Update tab first. After that, record each buy, sell, transfer between accounts, RSU vest or reward as it happens. For any holding with movements, the Update tab fills in its units for you; you only enter the price.
 - The header shows who saved the latest month and when.
 

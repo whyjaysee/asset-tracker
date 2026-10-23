@@ -130,11 +130,15 @@
   <div class="updatehead">
     <h1 id="title">Update</h1>
     <label>Month <input type="month" id="month"></label>
-    <button class="btn" id="citi-btn" type="button">Import Citi statement</button>
+    <span class="imports">
+      <button class="btn" id="citi-btn" type="button">Import Citi statement</button>
+      <button class="btn" id="saxo-btn" type="button">Sync from Saxo</button>
+    </span>
     <input type="file" id="citi-file" accept="application/pdf,.pdf" hidden>
   </div>
   <p class="hint" id="hint"></p>
   <section class="import" id="citi" aria-live="polite" hidden></section>
+  <section class="import" id="saxo" aria-live="polite" hidden></section>
   <div class="layout">
     <form id="form" autocomplete="off" novalidate></form>
     <aside class="summary" aria-live="polite">

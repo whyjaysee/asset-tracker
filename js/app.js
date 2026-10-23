@@ -92,7 +92,7 @@ function toast(text, isError) {
 
 
 // ---------- data: Supabase, signed in as a household member ----------
-const sb = window.supabase.createClient(window.NW_CONFIG.supabaseUrl, window.NW_CONFIG.supabaseAnonKey, { auth: { persistSession: true, detectSessionInUrl: true, flowType: 'implicit' } });
+const sb = window.supabase.createClient(window.NW_CONFIG.supabaseUrl, window.NW_CONFIG.supabaseAnonKey, { auth: { persistSession: true, detectSessionInUrl: false } });
 const api = {
   data: null, online: false, loadedAt: null,
   async rpc(fn, args) {
@@ -406,6 +406,7 @@ function startDraft(month) {
   exists = !!found; dirty = false;
   imported = new Set();
   $('citi').hidden = true;
+  $('saxo').hidden = true;
   if (found) {
     draft = JSON.parse(JSON.stringify(found));
   } else {
@@ -841,6 +842,182 @@ $('citi').addEventListener('input', (ev) => {
   applyOneOffs();
 });
 
+// ---------- Saxo sync: positions and cash balance ----------
+// Signs in on Saxo's own page (OAuth code flow with PKCE), reads positions and the cash balance,
+// and fills the form. The access token stays in memory for this one sync; nothing from Saxo is
+// stored except the figures you save. Account ids and keys are never shown or kept.
+const SAXO = { auth: 'https://live.logonvalidation.net', api: 'https://gateway.saxobank.com/openapi' };
+const SAXO_STASH = 'nw.saxo';
+const saxoRedirect = () => location.origin + location.pathname;
+const b64url = (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+let saxoBack = null, saxo = null;
+
+async function startSaxo() {
+  const key = window.NW_CONFIG.saxoAppKey;
+  if (!key) {
+    return showSaxo({ error: 'Saxo sync is not set up yet.', setup: true });
+  }
+  if (dirty) return showSaxo({ error: `You have unsaved changes to ${monthLong(draft.month)}. Save them first: signing in to Saxo leaves this page.` });
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+  const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  sessionStorage.setItem(SAXO_STASH, JSON.stringify({ verifier, state, month: draft.month }));
+  const q = new URLSearchParams({ response_type: 'code', client_id: key, state, redirect_uri: saxoRedirect(), code_challenge: challenge, code_challenge_method: 'S256' });
+  location.assign(`${SAXO.auth}/authorize?${q}`);
+}
+
+async function saxoGet(token, path) {
+  const out = [];
+  let url = SAXO.api + path;
+  while (url) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401 || res.status === 403) throw new Error('Saxo turned the request down. Sign in to Saxo again, and check the app has read access.');
+    if (!res.ok) throw new Error(`Saxo answered ${res.status}. Try again in a minute.`);
+    const body = await res.json();
+    if (!Array.isArray(body.Data)) return body;
+    out.push(...body.Data);
+    url = body.__next ? (body.__next.startsWith('http') ? body.__next : 'https://gateway.saxobank.com' + body.__next) : null;
+  }
+  return out;
+}
+
+// Runs after Saxo sends the browser back here with ?code=…&state=…, once the data has loaded.
+async function finishSaxo() {
+  const back = saxoBack;
+  saxoBack = null;
+  const stash = JSON.parse(sessionStorage.getItem(SAXO_STASH) || 'null');
+  sessionStorage.removeItem(SAXO_STASH);
+  showTab('update');
+  if (stash && stash.month) startDraft(stash.month);
+  if (back.error) return showSaxo({ error: `Saxo sign-in didn't finish (${back.error}). Try Sync from Saxo again.` });
+  if (!stash || stash.state !== back.state) return showSaxo({ error: 'That Saxo sign-in reply did not match this page. Try Sync from Saxo again.' });
+  showSaxo({ busy: true });
+  let positions, balance;
+  try {
+    const res = await fetch(`${SAXO.auth}/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: back.code, redirect_uri: saxoRedirect(), client_id: window.NW_CONFIG.saxoAppKey, code_verifier: stash.verifier }),
+    });
+    if (!res.ok) throw new Error(`Saxo did not accept the sign-in (${res.status}). Try Sync from Saxo again.`);
+    const token = (await res.json()).access_token;
+    [positions, balance] = await Promise.all([
+      saxoGet(token, '/port/v1/netpositions/me?FieldGroups=NetPositionBase,NetPositionView,DisplayAndFormat'),
+      saxoGet(token, '/port/v1/balances/me'),
+    ]);
+  } catch (e) {
+    return showSaxo({ error: /fetch|network|load failed/i.test(String(e && e.message)) ? "Couldn't reach Saxo from this page. Check your connection and try again." : String(e && e.message || e) });
+  }
+  fillSaxo(positions, balance);
+}
+
+// Converts between US$ and S$ at the month's rate (fx is US$ per S$1); null for other currencies.
+const convert = (v, from, to) => (from === to ? v : from === 'USD' && to === 'SGD' ? v / draft.fx : from === 'SGD' && to === 'USD' ? v * draft.fx : null);
+
+function fillSaxo(positions, balance) {
+  const notes = [], rows = [];
+  const items = data.items.filter((i) => /saxo/i.test(i.source || ''));
+  const holdings = items.filter((i) => i.kind === 'holding');
+  const put = (id, idx, v) => {
+    const e = draft.entries[id] || (draft.entries[id] = [null, null]);
+    e[idx] = idx === 0 ? v : Math.round(v * 1e6) / 1e6;
+    imported.add(`e.${id}.${idx}`);
+  };
+  for (const p of positions) {
+    const d = p.DisplayAndFormat || {}, base = p.NetPositionBase || {}, view = p.NetPositionView || {};
+    const symbol = String(d.Symbol || '').toUpperCase(), ticker = symbol.split(':')[0];
+    const units = Number(base.Amount), price = Number(view.CurrentPrice), currency = d.Currency || '';
+    const open = Number(view.AverageOpenPriceIncludingCosts ?? view.AverageOpenPrice);
+    const row = { ticker, name: d.Description || '', units, price, currency, value: units * price, cost: open > 0 ? Math.round(units * open * 100) / 100 : null, item: null, type: base.AssetType || '' };
+    rows.push(row);
+    const it = holdings.find((i) => [ticker, symbol].includes(String(i.name).toUpperCase()));
+    if (!it) continue;
+    row.item = it;
+    const px = convert(price, currency, it.currency);
+    if (px == null) { notes.push(`${ticker} is priced in ${currency}, which the tracker doesn't handle, so its price was left as it was.`); continue; }
+    put(it.id, 1, px);
+    if (tracked.has(it.id)) {
+      const mine = draft.entries[it.id][0];
+      if (Math.abs(mine - units) > 1e-9) notes.push(`Saxo shows ${plain(units)} ${ticker}, but Activity adds up to ${plain(mine)}. Record the missing buy or sell on the Activity tab.`);
+    } else put(it.id, 0, units);
+  }
+  for (const it of holdings.filter((i) => i.active && !rows.some((r) => r.item === i))) {
+    if ((draft.entries[it.id] || [])[0]) notes.push(`${it.name} is in the tracker but not in Saxo any more. If it was sold, record the sale on the Activity tab.`);
+  }
+
+  const cashItem = items.find((i) => i.kind === 'balance' && /cash/i.test(i.name));
+  const cash = cashItem && convert(Number(balance.CashBalance), balance.Currency, cashItem.currency);
+  if (cashItem && cash != null) put(cashItem.id, 0, Math.round(cash * 100) / 100);
+  else notes.push(cashItem ? `Saxo's cash is in ${balance.Currency}, which the tracker doesn't handle, so Broker cash was left as it was.` : 'No Saxo cash item to put the cash balance in.');
+
+  const total = items.find((i) => i.kind === 'balance' && i.active && !/cash/i.test(i.name));
+  if (total && !rows.some((r) => r.item)) {
+    const sum = rows.reduce((t, r) => { const v = convert(r.value, r.currency, total.currency); return v == null ? NaN : t + v; }, 0);
+    if (isNaN(sum)) notes.push(`Some positions are in currencies the tracker doesn't handle, so ${total.name} was left as it was.`);
+    else { put(total.id, 0, Math.round(sum * 100) / 100); notes.unshift(`${total.name} was filled with the total of your positions. Once you set up your holdings on the Activity tab, each position is filled separately.`); }
+  }
+
+  const now = new Date(), today = isoDay(now);
+  if (draft.month !== today.slice(0, 7)) notes.unshift(`These are Saxo's figures for today, ${dayMonth(today)} ${today.slice(0, 4)}, not the end of ${monthLong(draft.month)}.`);
+  saxo = { at: now, rows, cash: balance.CashBalance, cashCurrency: balance.Currency, notes, cashItem, total: total && !rows.some((r) => r.item) ? total : null };
+  dirty = true;
+  renderForm(); renderSummary();
+  showSaxo(saxo);
+}
+
+function showSaxo(r) {
+  const el = $('saxo');
+  el.hidden = false;
+  el.classList.toggle('error', !!r.error);
+  const close = '<p class="actions"><button class="btn" type="button" data-saxo="close">Close</button></p>';
+  if (r.busy) { el.innerHTML = '<p>Reading your Saxo positions…</p>'; return; }
+  if (r.error) {
+    const how = r.setup ? `<ol>
+      <li>In SaxoTraderGO, allow OpenAPI access for your account.</li>
+      <li>On developer.saxo, create a live application that uses PKCE, with read access, and add these redirect addresses: <code>https://whyjaysee.github.io/asset-tracker/</code> and <code>http://localhost:5500/</code>.</li>
+      <li>Put its app key in <code>js/config.js</code> as <code>saxoAppKey</code>.</li></ol>` : '';
+    el.innerHTML = `<h2>Saxo not synced</h2><p class="err">${esc(r.error)}</p>${how}${close}`;
+    return;
+  }
+  const unmatched = r.rows.filter((x) => !x.item);
+  const table = r.rows.length
+    ? `<div class="scroll"><table><tr><th class="desc">Position</th><th>Units</th><th>Price</th><th>Value</th><th class="desc">Into</th></tr>${r.rows.map((x) => `<tr>
+        <td class="desc">${esc(x.ticker)} <span class="muted">${esc(x.name)}</span></td><td>${plain(x.units)}</td><td>${esc(x.currency)} ${plain(x.price, 4)}</td>
+        <td>${esc(x.currency)} ${nf2.format(x.value)}</td><td class="desc">${x.item ? esc(holdingName(x.item)) : r.total ? esc(r.total.name) + ' (total)' : '<span class="muted">not in the tracker</span>'}</td></tr>`).join('')}</table></div>`
+    : '<p>No open positions.</p>';
+  const setupLink = unmatched.length && Array.isArray(api.data.movements) && !api.data.movements.length
+    ? '<button class="btn" type="button" data-saxo="setup">Use these in Your holdings today</button> ' : '';
+  el.innerHTML = `<h2>Saxo, ${clock(r.at)}</h2>
+    <p>Filled ${monthLong(draft.month)}${exists ? ', which was already saved; saving replaces it' : ''}. Check the highlighted fields, then save. Nothing is saved until you do.</p>
+    ${r.cashItem ? `<p>Cash ${esc(r.cashCurrency)} ${nf2.format(r.cash)}, into ${esc(r.cashItem.name)}.</p>` : ''}
+    ${r.notes.map((n) => `<p class="err">${esc(n)}</p>`).join('')}
+    ${table}
+    ${unmatched.length && !r.total ? `<p>${unmatched.length === 1 ? 'One position isn\'t' : unmatched.length + ' positions aren\'t'} in the tracker yet. Add ${unmatched.length === 1 ? 'it' : 'them'} on the Activity tab.</p>` : ''}
+    <p class="actions">${setupLink}<button class="btn" type="button" data-saxo="close">Close</button></p>`;
+}
+
+// Puts Saxo's positions into the one-time holdings set-up on the Activity tab.
+function saxoToSetup() {
+  if (!setupRows) setupRows = setupStart(api.data);
+  setupRows = setupRows.filter((r) => !(/saxo/i.test(r.account) && !r.asset.trim() && !String(r.units).trim()));
+  for (const x of saxo.rows.filter((r) => !r.item)) {
+    const cost = x.cost != null && x.currency === 'USD' ? String(x.cost) : '';
+    const row = setupRows.find((r) => setupKey(r.account, r.asset) === setupKey('Saxo', x.ticker));
+    if (row) Object.assign(row, { units: String(x.units), cost: row.cost || cost });
+    else setupRows.push({ account: 'Saxo', asset: x.ticker, cat: 'stocks', units: String(x.units), cost });
+  }
+  $('setup-date').value = isoDay(saxo.at);
+  showTab('activity');
+  renderActivity(api.data);
+}
+
+$('saxo-btn').onclick = startSaxo;
+$('saxo').addEventListener('click', (ev) => {
+  const a = ev.target.dataset.saxo;
+  if (a === 'close') $('saxo').hidden = true;
+  if (a === 'setup') saxoToSetup();
+});
+
 // ---------- accounts and holdings ----------
 function renderItems() {
   const cat = Object.fromEntries(CATS.map((c) => [c.id, c.name]));
@@ -1148,6 +1325,7 @@ async function refresh() {
     return;
   }
   setStatus(''); noteFresh(); safePaint();
+  if (saxoBack) finishSaxo();
 }
 function safePaint() {
   try { paint(); } catch (e) { setStatus('<b>Part of the page could not be drawn.</b> ' + esc(e && e.message), true, 'Try again', refresh); }
@@ -1211,6 +1389,11 @@ $('signout').onclick = async () => { await sb.auth.signOut(); api.data = null; l
 
 (async function start() {
   for (const t of Object.keys(TABS)) $('tab-' + t).onclick = () => showTab(t);
+  const q = new URLSearchParams(location.search);
+  if (q.has('state') && (q.has('code') || q.has('error'))) {
+    saxoBack = { code: q.get('code'), state: q.get('state'), error: q.get('error_description') || q.get('error') };
+    history.replaceState(null, '', location.pathname + '#update');
+  }
   showTab(TABS[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
   sb.auth.onAuthStateChange((event, session) => {
     if (session && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION')) showSignedIn(session);

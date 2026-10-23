@@ -24,8 +24,8 @@ backed by Supabase. Read this before changing anything.
 |---|---|
 | `index.html` | Markup: header, sign-in screen, Overview, Activity and Update tabs |
 | `styles.css` | All styling. Colour tokens at the top, light and dark |
-| `js/config.js` | Supabase URL and anon key |
-| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Activity (`renderActivity`, `addMovement`, ...); tabs; sign-in and start-up |
+| `js/config.js` | Supabase URL and anon key; Saxo app key (empty = Saxo sync off) |
+| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
@@ -75,6 +75,19 @@ balance if there's none), and that credit is the salary. Movements of S$5,000 or
 tick as one-offs. Accounts map to Citibank cash items by currency and name (deposits to deposits),
 never by account number: account numbers must never be stored, shown or committed, and statement
 text shown on screen goes through `scrub()`. Never commit a statement or anything taken from one.
+
+## Saxo sync
+"Sync from Saxo" on the Update tab reads positions and the cash balance from Saxo's OpenAPI (live)
+and fills the form; no trades. Sign-in is OAuth code flow with PKCE on Saxo's own page
+(`live.logonvalidation.net`), using the app key in `js/config.js` (public by design: PKCE apps have
+no secret). The verifier, state and month sit in sessionStorage only across the redirect; the
+access token is kept in memory for the one sync and never stored. On return (`?code=&state=`),
+`finishSaxo` runs after the data loads: `/port/v1/netpositions/me` and `/port/v1/balances/me`.
+Positions match Saxo holdings by ticker (the symbol before ":"); prices are filled, units only for
+holdings not tracked by Activity (a difference is reported instead). Broker cash takes CashBalance.
+Before the holdings set-up, the Stock positions total takes the sum of positions, and the panel
+offers to copy the positions into the set-up form. Supabase's `detectSessionInUrl` is off so it
+never treats Saxo's reply as its own. Saxo account ids, keys and tokens are never shown or stored.
 
 ## How the site talks to the database
 The browser never touches tables. It calls these RPC functions through supabase-js:
