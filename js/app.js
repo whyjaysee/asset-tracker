@@ -29,6 +29,8 @@ const compact = (v) => {
   return (v < 0 ? '−' : '') + (a >= 1e6 ? (a / 1e6).toFixed(a % 1e6 ? 1 : 0) + 'm' : a >= 1000 ? Math.round(a / 1000) + 'k' : Math.round(a));
 };
 const plain = (v, maxDp = 6) => (v == null ? '' : new Intl.NumberFormat('en-SG', { maximumFractionDigits: maxDp }).format(v));
+// Decimal places that keep very small prices (such as BONK at US$0.0000038) exact.
+const tiny = (v, dp = 6) => (v && Math.abs(v) < 0.01 ? 10 : dp);
 
 // Value of one entry in SGD. fx is USD per 1 SGD (0.78 means S$1 = US$0.78).
 function entrySgd(item, entry, fx) {
@@ -446,7 +448,7 @@ function applyTracked() {
 
 function field(key, value, prefix, label, cls = '') {
   if (imported.has(key)) cls += ' changed';
-  return `<div class="field ${cls}"><span>${prefix}</span><input inputmode="decimal" data-key="${key}" value="${value == null ? '' : plain(value)}" aria-label="${esc(label)}"></div>`;
+  return `<div class="field ${cls}"><span>${prefix}</span><input inputmode="decimal" data-key="${key}" value="${value == null ? '' : plain(value, tiny(value))}" aria-label="${esc(label)}"></div>`;
 }
 
 // One section per place you check, in the order you check them.
@@ -472,7 +474,7 @@ function renderForm() {
       const e = draft.entries[it.id] || [null, null], b = base && base.entries[it.id];
       const dot = `<span class="dot" style="--c:var(--${it.category})"></span>`;
       if (it.kind === 'holding') {
-        const price = row(`${dot}${esc(it.name)} price`, field(`e.${it.id}.1`, e[1], sym(it.currency), `${it.name} price`, 'span2'), b ? 'was ' + plain(b[1], 2) : '');
+        const price = row(`${dot}${esc(it.name)} price`, field(`e.${it.id}.1`, e[1], sym(it.currency), `${it.name} price`, 'span2'), b ? 'was ' + plain(b[1], tiny(b[1], 2)) : '');
         (it.monthly ? now : carried).push(price);
         if (tracked.has(it.id)) {
           carried.push(row(`${dot}${esc(it.name)} units held`, `<div class="field quiet span2"><input value="${plain(e[0])}" readonly aria-label="${esc(it.name)} units held, from Activity"></div>`, 'from Activity'));
@@ -748,7 +750,6 @@ function citiItem(acc) {
 
 let citi = null;
 async function importCiti(bytes) {
-  if (dirty) return showCiti({ error: `You have unsaved changes to ${monthLong(draft.month)}. Save them, or reload the page to discard them, then import again.` });
   showCiti({ busy: true });
   let r;
   try { r = readCiti(await pdfLines(bytes)); }
@@ -756,8 +757,10 @@ async function importCiti(bytes) {
   if (r.error) return showCiti(r);
   const month = r.end.slice(0, 7);
   if (month <= FROZEN_UNTIL) return showCiti({ error: `This statement ends in ${monthLong(month)}, inside the imported history, which isn't changed. Import a later statement.` });
+  if (dirty && draft.month !== month) return showCiti({ error: `This statement is for ${monthLong(month)}, but you have unsaved changes to ${monthLong(draft.month)}. Save them first, then import again.` });
 
-  startDraft(month);
+  // Fills into the open draft when it's the statement's month, keeping anything already entered.
+  if (!dirty || draft.month !== month) startDraft(month);
   const notes = [], fills = new Map();
   const savings = r.accounts.find((a) => /interestplus/i.test(a.name)) || r.accounts.find((a) => a.currency === 'SGD' && !/deposit/i.test(a.name));
   const pay = savings && [...savings.txs].reverse().find((t) => t.signed > 0 && /SALARY\s*PAYMENT/i.test(t.desc));
