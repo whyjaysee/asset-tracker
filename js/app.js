@@ -371,7 +371,44 @@ function buildChart() {
   });
 }
 
-function renderMonth() { renderHeadline(); renderHoldings(); renderFlow(); }
+// Crypto for the chosen month, one row per coin; the bar is split by the account it's held in.
+// Before the holdings set-up, crypto was stored as combined lines; those show as they were.
+function renderCoins() {
+  const r = selected();
+  const lines = r.lines.filter((l) => l.item.category === 'crypto' && Math.abs(l.value) > 0.5);
+  $('coins-sec').hidden = !lines.length;
+  if (!lines.length) return;
+  const total = lines.reduce((t, l) => t + l.value, 0);
+  const byAccount = {};
+  for (const l of lines) byAccount[l.item.source || 'Other'] = (byAccount[l.item.source || 'Other'] || 0) + l.value;
+  const accounts = Object.keys(byAccount).sort((a, b) => byAccount[b] - byAccount[a]);
+  const color = (a) => `var(--acct-${(accounts.indexOf(a) % 5) + 1})`;
+  const coins = {};
+  for (const l of lines) {
+    const holding = l.item.kind === 'holding', key = holding ? l.item.name.toUpperCase() : 'total:' + l.item.id;
+    const c = coins[key] || (coins[key] = { name: holding ? l.item.name : `${l.item.name} (all coins)`, holding, value: 0, units: 0, parts: [] });
+    c.value += l.value;
+    if (holding) c.units += l.amount;
+    c.parts.push({ account: l.item.source || 'Other', value: l.value, units: holding ? l.amount : null });
+  }
+  const list = Object.values(coins).sort((a, b) => b.value - a.value), max = Math.max(list[0].value, 1);
+  $('coins-title').textContent = `Crypto by coin, ${monthLong(r.month)}`;
+  $('coins-legend').innerHTML = accounts.map((a) => `<span class="legend" style="--c:${color(a)}"><span class="dot"></span>${esc(a)} ${money(byAccount[a])}</span>`).join('');
+  $('coins').innerHTML = list.map((c) => {
+    c.parts.sort((a, b) => accounts.indexOf(a.account) - accounts.indexOf(b.account));
+    const where = c.parts.map((p) => `${p.account} ${p.units != null ? plain(p.units, 6) : money(p.value)}`).join(', ');
+    return `<div class="coin">
+      <div class="coinname">${esc(c.name)}${c.holding ? `<span class="muted">${plain(c.units, 6)}</span>` : ''}</div>
+      <div class="coinbar" role="img" aria-label="${esc(c.name)}: ${esc(where)}"><div style="width:${(Math.max(c.value, 0) / max * 100).toFixed(2)}%">${c.parts.map((p) =>
+        `<span style="--c:${color(p.account)};flex:${Math.max(p.value, 0)}" title="${esc(p.account)}: ${p.units != null ? plain(p.units, 6) + ' ' + esc(c.name) + ', ' : ''}${money(p.value)}"></span>`).join('')}</div></div>
+      <div class="coinval">${money(c.value)} <span class="muted">${pct(c.value / total)}</span></div>
+      <div class="coinparts">${c.parts.map((p) => `<span><span class="dot" style="--c:${color(p.account)}"></span>${esc(p.account)} ${p.units != null ? plain(p.units, 6) : ''} <span class="muted">${money(p.value)}</span></span>`).join(' &nbsp; ')}</div>
+    </div>`;
+  }).join('');
+  $('coins-note').textContent = `${money(total)} in crypto across ${accounts.length} ${accounts.length === 1 ? 'account' : 'accounts'}. Bars are sized against the largest coin; colours show where each is held.`;
+}
+
+function renderMonth() { renderHeadline(); renderHoldings(); renderFlow(); renderCoins(); }
 function renderControls() {
   seg($('views'), VIEWS, state.view, (v) => { state.view = v; prefs.set('view', v); renderControls(); buildChart(); });
   seg($('ranges'), RANGES, state.range, (v) => { state.range = v; prefs.set('range', v); renderControls(); buildChart(); });

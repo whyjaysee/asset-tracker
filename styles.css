@@ -15,6 +15,11 @@
   --stocks: #eb6834;
   --crypto: #1baf7a;
   --rsu: #eda100;
+  --acct-1: #6a4ce0;
+  --acct-2: #d9488f;
+  --acct-3: #0b8f8a;
+  --acct-4: #b8740a;
+  --acct-5: #5b6b7a;
   --display: Charter, 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   --body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
 }
@@ -33,7 +38,12 @@
     --cash: #3987e5;
     --stocks: #d95926;
     --crypto: #199e70;
-    --rsu: #c98500; } }
+    --rsu: #c98500;
+    --acct-1: #9d86ff;
+    --acct-2: #f06aa8;
+    --acct-3: #2fc1b9;
+    --acct-4: #e0a23c;
+    --acct-5: #8d9aa6; } }
 :root[data-theme="dark"] { color-scheme: dark;
     --bg: #111514;
     --surface: #1a1a19;
@@ -49,7 +59,12 @@
     --cash: #3987e5;
     --stocks: #d95926;
     --crypto: #199e70;
-    --rsu: #c98500; }
+    --rsu: #c98500;
+    --acct-1: #9d86ff;
+    --acct-2: #f06aa8;
+    --acct-3: #2fc1b9;
+    --acct-4: #e0a23c;
+    --acct-5: #8d9aa6; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); font-variant-numeric: tabular-nums; }
@@ -176,6 +191,23 @@ details.carried { margin-top: 8px; border-top: 1px solid var(--line); padding-to
 details.carried summary .sum { font: 14px var(--body); color: var(--ink-2); margin-left: 8px; }
 details.carried h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 20px 0 6px; }
 details.carried .hint { margin: 10px 0 12px; }
+
+/* Overview: crypto by coin, split by where it's held */
+.coins { margin-top: 36px; }
+.coins .legendrow { display: flex; flex-wrap: wrap; margin-bottom: 6px; }
+.coins .legend .dot { display: inline-block; }
+.coin { display: grid; grid-template-columns: minmax(110px, 160px) minmax(0, 1fr) auto; gap: 2px 16px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.coinname { font-weight: 600; }
+.coinname .muted { font-weight: 400; font-size: 13px; margin-left: 6px; }
+.coinbar > div { display: flex; gap: 2px; height: 14px; min-width: 3px; }
+.coinbar span { background: var(--c); border-radius: 3px; min-width: 3px; }
+.coinval { text-align: right; white-space: nowrap; }
+.coinparts { grid-column: 2 / -1; font-size: 13px; color: var(--ink-2); }
+.coinparts .dot { display: inline-block; width: 8px; height: 8px; margin-right: 4px; }
+@media (max-width: 860px) {
+  .coin { grid-template-columns: minmax(0, 1fr) auto; }
+  .coinbar, .coinparts { grid-column: 1 / -1; }
+}
 
 /* Citi statement import */
 .import { background: var(--surface); border: 1px solid var(--accent); border-radius: 14px; padding: 18px 20px; margin: 0 0 24px; }
