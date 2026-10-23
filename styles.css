@@ -240,6 +240,12 @@ select.pick { background: var(--field); border: 1px solid var(--line); border-ra
 #setup-off label .dot { display: inline-block; }
 .hint.warn { color: var(--down); }
 .acttitle { margin-top: 36px; }
+.acthead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.acthead .btn { margin-left: auto; }
+.import td select { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; }
+.import .ok { color: var(--up); }
+.import details { margin-top: 16px; }
+.import details summary { font-size: 16px; }
 #act-positions dt .dot { display: inline-block; margin-right: 6px; }
 #act-list td:nth-child(2), #act-list th:nth-child(2), #act-list td:nth-child(3), #act-list th:nth-child(3) { text-align: left; }
 #act-list td.note { text-align: left; color: var(--ink-2); white-space: normal; min-width: 120px; }

@@ -103,7 +103,7 @@
     <div class="layout">
       <form id="act-form" autocomplete="off" novalidate>
         <fieldset>
-          <legend>Add a movement</legend>
+          <legend id="act-legend">Add a movement</legend>
           <div class="row"><label for="act-type">What happened</label><select id="act-type" class="span2 pick">
             <option value="buy">Bought</option><option value="sell">Sold</option><option value="transfer">Moved between accounts</option>
             <option value="vest">RSU vested</option><option value="reward">Reward, dividend or interest paid in units</option>
@@ -118,6 +118,7 @@
           <div class="row"><label for="act-note">Note</label><div class="field text span2"><input id="act-note" placeholder="optional" aria-label="Note"></div></div>
           <p class="hint" id="act-help"></p>
           <button class="btn primary" id="act-add" type="submit">Add</button>
+          <button class="btn" id="act-cancel" type="button" hidden>Cancel</button>
         </fieldset>
       </form>
       <aside class="summary">
@@ -126,7 +127,12 @@
         <p class="fine">A new account or asset? Add it under Update, Accounts and holdings, as units × price.</p>
       </aside>
     </div>
-    <h2 class="acttitle">Movements</h2>
+    <div class="acthead">
+      <h2 class="acttitle">Movements</h2>
+      <button class="btn" id="kraken-btn" type="button">Import Kraken ledger</button>
+      <input type="file" id="kraken-file" accept=".csv,text/csv,application/pdf,.pdf" hidden>
+    </div>
+    <section class="import" id="kraken" aria-live="polite" hidden></section>
     <p class="hint" id="act-none">Nothing recorded yet.</p>
     <div class="scroll"><table id="act-list"></table></div>
     </div>

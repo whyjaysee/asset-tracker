@@ -14,7 +14,7 @@ backed by Supabase. Read this before changing anything.
   the last release with a UMD build). They're vendored on purpose so the site loads nothing from
   other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
   `isEvalSupported: false`.
-- **Database changes go in a new numbered file** in `supabase/` (next is `006_...sql`), written
+- **Database changes go in a new numbered file** in `supabase/` (next is `007_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
   or rewritten. Change how things are shown, not the stored past.
@@ -30,6 +30,7 @@ backed by Supabase. Read this before changing anything.
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
 | `supabase/005_owed.sql` | Money owed back table, `nw_save_owed`, `nw_delete_owed`, and `nw_load` with owed |
+| `supabase/006_reconcile.sql` | Movement `ref`, `nw_apply_movements` (change, delete and add movements in one go), and `nw_load` with refs |
 | `docs/portfolio-analysis-prompt.md` | Prompt for a separate, read-only analysis chat. Keep its table descriptions in step with any schema change |
 | `.github/workflows/keep-alive.yml` | Pings `nw_ping()` twice a week so the free project doesn't pause |
 
@@ -73,8 +74,29 @@ its movements up to that month's last day, and the Update form shows them read-o
 price is entered. Holdings without movements, balances and bank cash work as before. Saved months
 are not rewritten: a month picks up new units only when it's saved again. Switched-off items are
 not carried into a new month, so switching off a total that positions replace (such as
-Stock positions at Saxo) doesn't count it twice. Next: cost basis and gains from movements, then
-prices fetched automatically.
+Stock positions at Saxo) doesn't count it twice. Movements can be changed (Edit on the Activity
+list) through `nw_apply_movements`, which refuses anything that leaves a holding below zero on any
+date. Cost basis and gains come from movements by average cost (`costsAt()`): a buy adds its amount
+and fee, a reward or vest its value, a sale takes cost off at the average (the rest is realised
+gain), a transfer carries cost across, a fee in units keeps the cost, and an opening without a cost
+makes the holding's cost unknown. The Overview shows Cost and Gain per holding; where part of a
+combined line has no cost, the gain covers only the part that does. Next: prices fetched
+automatically.
+
+## Kraken ledger import
+"Import Kraken ledger" on the Activity tab reads Kraken's ledger export in the browser: the CSV
+(exact; columns refid, time, type, subtype, asset, wallet, amount, fee, balance, amountusd) or the
+PDF statement (amounts rounded to 4 decimal places, so differences under 0.0005 are ignored). Asset
+codes are normalised (`krakenCoin`: XXBT to BTC, ETH.F to ETH). A coin's balance on a day is the last
+resulting balance of each asset and wallet, added up (`krakenTotals`). For each Kraken holding with
+movements, `krakenPlan` proposes: correcting the opening to the ledger's balance on the opening
+date (only when the file starts by then), one staking reward per coin per month (valued from
+amountusd), buys and sells (priced from the US$ or stablecoin leg), deposits and withdrawals (the
+other account is chosen, or skipped), and anything else as a reward or fee. Entries netting to zero
+(moves between wallets) are ignored. Changes carry refs (`kraken:reward:ETH:2026-10`,
+`kraken:<refid>:<coin>`), so importing again proposes only what's new. `krakenHistory` shows
+month-end Kraken balances beside the ETH and BTC the tracker stored across all accounts, for
+correcting past months on the Update tab. The file is never uploaded or kept.
 
 ## Citi statement import
 "Import Citi statement" on the Update tab reads a Citibank Singapore PDF statement entirely in the
@@ -108,7 +130,8 @@ The browser never touches tables. It calls these RPC functions through supabase-
 `nw_load()`, `nw_save_month(d jsonb)`, `nw_delete_month(m text)`, `nw_save_item(d jsonb)`,
 `nw_save_movements(d jsonb)` (a list, saved all or nothing), `nw_delete_movement(m_id bigint)`,
 `nw_setup_holdings(d jsonb)` (the one-time start: creates holdings, their opening balances and
-switches off the totals they replace, all or nothing), `nw_save_owed(d jsonb)`, `nw_delete_owed(o_id bigint)`.
+switches off the totals they replace, all or nothing), `nw_save_owed(d jsonb)`, `nw_delete_owed(o_id bigint)`,
+`nw_apply_movements(d jsonb)` (`{ delete, update, add }`, all or nothing; adds with an existing ref are skipped).
 Each is `SECURITY DEFINER` and starts with `nw_require_member()`, which allows a signed-in user
 only if their email is in `nw_members`. Each returns the full dataset (same shape as `nw_load`),
 which the page re-renders from. Keep that contract: any new write function must call
