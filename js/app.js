@@ -207,18 +207,42 @@ function renderHeadline() {
   $('sharebar').innerHTML = cats.map((c) => `<span style="--c:var(--${c.id});flex:${Math.max(r.by[c.id], 0)}"></span>`).join('');
 }
 
+// Crypto is shown as ETH, BTC and everything else, each combined across accounts.
+const coinGroup = (it) => (/^ETH\b/i.test(it.name) ? 'ETH' : /^BTC\b/i.test(it.name) ? 'BTC' : 'Others');
+function cryptoGroups(lines) {
+  const groups = {};
+  for (const l of lines) {
+    const g = coinGroup(l.item);
+    const x = groups[g] || (groups[g] = { name: g, value: 0, units: 0, usd: 0, unitsKnown: g !== 'Others', parts: {}, coins: {} });
+    x.value += l.value;
+    if (l.item.kind === 'holding') { x.units += l.amount; x.usd += l.amount * (l.price || 0); } else x.unitsKnown = false;
+    const a = l.item.source || 'Other';
+    const p = x.parts[a] || (x.parts[a] = { account: a, value: 0, units: 0 });
+    p.value += l.value;
+    if (l.item.kind === 'holding') p.units += l.amount;
+    const coin = l.item.kind === 'holding' ? l.item.name : `${l.item.name} (all coins)`;
+    x.coins[coin] = (x.coins[coin] || 0) + l.value;
+  }
+  return ['ETH', 'BTC', 'Others'].filter((g) => groups[g]).map((g) => groups[g]);
+}
+
 function renderHoldings() {
   const r = selected();
   $('holdtitle').textContent = `What you held in ${monthLong(r.month)}`;
   const order = Object.fromEntries(CATS.map((c, i) => [c.id, i]));
-  const lines = r.lines.filter((l) => Math.abs(l.value) > 0.5).sort((a, b) => order[a.item.category] - order[b.item.category] || b.value - a.value);
+  const shown = r.lines.filter((l) => Math.abs(l.value) > 0.5);
+  const crypto = cryptoGroups(shown.filter((l) => l.item.category === 'crypto')).map((g) => ({
+    item: { name: g.name !== 'Others' ? g.name : Object.keys(g.coins).some((c) => c.endsWith('(all coins)')) ? 'Other crypto' : `Other crypto (${Object.keys(g.coins).length})`, category: 'crypto', kind: g.unitsKnown ? 'holding' : 'group' },
+    amount: g.units, price: g.units ? g.usd / g.units : null, value: g.value,
+  }));
+  const lines = shown.filter((l) => l.item.category !== 'crypto').concat(crypto).sort((a, b) => order[a.item.category] - order[b.item.category] || b.value - a.value);
   $('holdings').innerHTML = '<tr><th>Holding</th><th>Units</th><th>Price</th><th>Value</th><th>Share</th></tr>' + lines.map((l) => {
     const h = l.item.kind === 'holding';
-    const native = l.item.currency === 'USD' && !h ? ` <span class="muted">US$${plain(l.amount, 0)}</span>` : '';
+    const native = l.item.currency === 'USD' && l.item.kind === 'balance' ? ` <span class="muted">US$${plain(l.amount, 0)}</span>` : '';
     return `<tr><td><span class="dot" style="--c:var(--${l.item.category})"></span>${esc(l.item.name)}${native}</td>
-      <td>${h ? plain(l.amount, 4) : ''}</td><td>${h ? 'US$' + plain(l.price, 2) : ''}</td>
+      <td>${h ? plain(l.amount, 4) : ''}</td><td>${h && l.price != null ? 'US$' + plain(l.price, tiny(l.price, 2)) : ''}</td>
       <td>${money(l.value)}</td><td class="muted">${pct(l.value / r.net)}</td></tr>`;
-  }).join('') + `<tr><td class="muted" colspan="5" style="border:0">US$ converted at S$1 = US$${r.fx}</td></tr>`;
+  }).join('') + `<tr><td class="muted" colspan="5" style="border:0;white-space:normal">US$ converted at S$1 = US$${r.fx}. Crypto is combined across accounts; ETH and BTC prices are averages.</td></tr>`;
 }
 
 function renderFlow() {
@@ -371,8 +395,8 @@ function buildChart() {
   });
 }
 
-// Crypto for the chosen month, one row per coin; the bar is split by the account it's held in.
-// Before the holdings set-up, crypto was stored as combined lines; those show as they were.
+// Crypto for the chosen month as ETH, BTC and Others; each bar is split by the account it's held in.
+// Before the holdings set-up, crypto was stored as combined lines; those are grouped the same way.
 function renderCoins() {
   const r = selected();
   const lines = r.lines.filter((l) => l.item.category === 'crypto' && Math.abs(l.value) > 0.5);
@@ -383,26 +407,22 @@ function renderCoins() {
   for (const l of lines) byAccount[l.item.source || 'Other'] = (byAccount[l.item.source || 'Other'] || 0) + l.value;
   const accounts = Object.keys(byAccount).sort((a, b) => byAccount[b] - byAccount[a]);
   const color = (a) => `var(--acct-${(accounts.indexOf(a) % 5) + 1})`;
-  const coins = {};
-  for (const l of lines) {
-    const holding = l.item.kind === 'holding', key = holding ? l.item.name.toUpperCase() : 'total:' + l.item.id;
-    const c = coins[key] || (coins[key] = { name: holding ? l.item.name : `${l.item.name} (all coins)`, holding, value: 0, units: 0, parts: [] });
-    c.value += l.value;
-    if (holding) c.units += l.amount;
-    c.parts.push({ account: l.item.source || 'Other', value: l.value, units: holding ? l.amount : null });
-  }
-  const list = Object.values(coins).sort((a, b) => b.value - a.value), max = Math.max(list[0].value, 1);
+  const list = cryptoGroups(lines), max = Math.max(...list.map((g) => g.value), 1);
   $('coins-title').textContent = `Crypto by coin, ${monthLong(r.month)}`;
   $('coins-legend').innerHTML = accounts.map((a) => `<span class="legend" style="--c:${color(a)}"><span class="dot"></span>${esc(a)} ${money(byAccount[a])}</span>`).join('');
-  $('coins').innerHTML = list.map((c) => {
-    c.parts.sort((a, b) => accounts.indexOf(a.account) - accounts.indexOf(b.account));
-    const where = c.parts.map((p) => `${p.account} ${p.units != null ? plain(p.units, 6) : money(p.value)}`).join(', ');
+  $('coins').innerHTML = list.map((g) => {
+    const parts = Object.values(g.parts).sort((a, b) => accounts.indexOf(a.account) - accounts.indexOf(b.account));
+    const units = (p) => (g.unitsKnown ? plain(p.units, 6) : '');
+    const where = parts.map((p) => `${p.account} ${g.unitsKnown ? plain(p.units, 6) : money(p.value)}`).join(', ');
+    const inside = g.name === 'Others'
+      ? `<div class="coinparts muted">${Object.entries(g.coins).sort((a, b) => b[1] - a[1]).map(([c, v]) => `${esc(c)} ${money(v)}`).join(' · ')}</div>` : '';
     return `<div class="coin">
-      <div class="coinname">${esc(c.name)}${c.holding ? `<span class="muted">${plain(c.units, 6)}</span>` : ''}</div>
-      <div class="coinbar" role="img" aria-label="${esc(c.name)}: ${esc(where)}"><div style="width:${(Math.max(c.value, 0) / max * 100).toFixed(2)}%">${c.parts.map((p) =>
-        `<span style="--c:${color(p.account)};flex:${Math.max(p.value, 0)}" title="${esc(p.account)}: ${p.units != null ? plain(p.units, 6) + ' ' + esc(c.name) + ', ' : ''}${money(p.value)}"></span>`).join('')}</div></div>
-      <div class="coinval">${money(c.value)} <span class="muted">${pct(c.value / total)}</span></div>
-      <div class="coinparts">${c.parts.map((p) => `<span><span class="dot" style="--c:${color(p.account)}"></span>${esc(p.account)} ${p.units != null ? plain(p.units, 6) : ''} <span class="muted">${money(p.value)}</span></span>`).join(' &nbsp; ')}</div>
+      <div class="coinname">${esc(g.name)}${g.unitsKnown ? `<span class="muted">${plain(g.units, 6)}</span>` : ''}</div>
+      <div class="coinbar" role="img" aria-label="${esc(g.name)}: ${esc(where)}"><div style="width:${(Math.max(g.value, 0) / max * 100).toFixed(2)}%">${parts.map((p) =>
+        `<span style="--c:${color(p.account)};flex:${Math.max(p.value, 0)}" title="${esc(p.account)}: ${g.unitsKnown ? plain(p.units, 6) + ' ' + esc(g.name) + ', ' : ''}${money(p.value)}"></span>`).join('')}</div></div>
+      <div class="coinval">${money(g.value)} <span class="muted">${pct(g.value / total)}</span></div>
+      <div class="coinparts">${parts.map((p) => `<span><span class="dot" style="--c:${color(p.account)}"></span>${esc(p.account)} ${units(p)} <span class="muted">${money(p.value)}</span></span>`).join(' &nbsp; ')}</div>
+      ${inside}
     </div>`;
   }).join('');
   $('coins-note').textContent = `${money(total)} in crypto across ${accounts.length} ${accounts.length === 1 ? 'account' : 'accounts'}. Bars are sized against the largest coin; colours show where each is held.`;
