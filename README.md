@@ -76,6 +76,9 @@ app fits together; Cursor and Claude read it automatically.
 To preview locally, run `python3 -m http.server 5500` in the folder and open http://localhost:5500.
 The local copy uses the live database. Push to `main` to publish.
 
+## Analysing the portfolio
+`docs/portfolio-analysis-prompt.md` has a ready-made prompt for a separate Claude chat that reads the data from Supabase without changing it.
+
 ## Using it
 - Sign in with your email and password. Let Safari save them to iCloud Keychain and it fills them in with Touch ID or Face ID next time. You stay signed in after that.
 - Optional: once signed in, choose **Add passkey** at the top; after that **Sign in with a passkey** needs no password. Passkeys work only on the live site, not on a local preview.

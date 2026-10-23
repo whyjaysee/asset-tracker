@@ -25,6 +25,7 @@ backed by Supabase. Read this before changing anything.
 | `js/app.js` | All logic, in this order: helpers and `compute()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `renderForm`, `save`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
+| `docs/portfolio-analysis-prompt.md` | Prompt for a separate, read-only analysis chat. Keep its table descriptions in step with any schema change |
 | `.github/workflows/keep-alive.yml` | Pings `nw_ping()` twice a week so the free project doesn't pause |
 
 `001_setup.sql` (tables plus the imported history) is deliberately not in the repo.
