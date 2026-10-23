@@ -624,9 +624,15 @@ const CURRENCY = /\b(SGD|USD|EUR|GBP|AUD|HKD|JPY|CNY|CHF|CAD|NZD)\b/;
 // Amounts such as 1,234.56, also with a stray space before the decimals ("109,862 .01").
 const AMOUNT = /(?<![\d,.])(\d{1,3}(?:,\d{3})+|\d+)\s?\.\s?(\d{2})(?!\d|\s?%)/g;
 const DAY_MON_YEAR = '(\\d{1,2})\\s?([A-Za-z]{3,9})\\.?,?\\s?(\\d{4})';
+const MON_DAY_YEAR = '([A-Za-z]{3,9})\\.?\\s(\\d{1,2}),?\\s(\\d{4})';
 const PERIOD = new RegExp(`${DAY_MON_YEAR}\\s*(?:-|–|to)\\s*${DAY_MON_YEAR}`, 'i');
+const PERIOD_MDY = new RegExp(`${MON_DAY_YEAR}\\s*(?:-|–|to)\\s*${MON_DAY_YEAR}`, 'i');
 const PERIOD_NUM = /(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(?:-|–|to)\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i;
-const TX_DATE = /^(\d{1,2})\s?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|^(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/i;
+const MON = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
+// A date at the start of a transaction line: "28 SEP", "Sep 28 2026" or "28/09".
+const TX_DATE = new RegExp(`^(?:(\\d{1,2})\\s?${MON}|${MON}\\s(\\d{1,2}),?(?:\\s(\\d{4}))?|(\\d{1,2})\\/(\\d{1,2})(?:\\/\\d{2,4})?)\\b\\s*`, 'i');
+// Page furniture between pages, skipped so it doesn't join a transaction's description.
+const PAGE_NOISE = /^Page \d+ of \d+$|Statement Period|\(continued\)\s*$|^Transactions Done$|^\S+\/\S+\/\S+\/\S+$/i;
 const nf2 = new Intl.NumberFormat('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const cur2 = (v, c) => (v < 0 ? '−' : '') + sym(c) + nf2.format(Math.abs(v));
 const cents = (v) => Math.round(v * 100) / 100;
@@ -693,7 +699,8 @@ function readCiti(lines) {
   let start = null, end = null;
   for (const l of lines) {
     let m = PERIOD.exec(l.text);
-    if (m) { start = isoDate(+m[3], monthIndex(m[2]), +m[1]); end = isoDate(+m[6], monthIndex(m[5]), +m[4]); }
+    if (m && monthIndex(m[2]) && monthIndex(m[5])) { start = isoDate(+m[3], monthIndex(m[2]), +m[1]); end = isoDate(+m[6], monthIndex(m[5]), +m[4]); }
+    else if ((m = PERIOD_MDY.exec(l.text)) && monthIndex(m[1]) && monthIndex(m[4])) { start = isoDate(+m[3], monthIndex(m[1]), +m[2]); end = isoDate(+m[6], monthIndex(m[4]), +m[5]); }
     else if ((m = PERIOD_NUM.exec(l.text))) { start = isoDate(+m[3], +m[2], +m[1]); end = isoDate(+m[6], +m[5], +m[4]); }
     if (end) break;
   }
@@ -709,7 +716,7 @@ function readCiti(lines) {
     const bal = c && l.amounts.find((a) => a.i > c.index);
     if (!bal) continue;
     const name = l.raw.slice(0, c.index).replace(/\d[\d\s-]*/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!name || /^(total|account|currency|balance)\b/i.test(name)) continue;
+    if (!name || /\btotal\b/i.test(name) || /^(account|currency|balance)\b/i.test(name)) continue;
     const same = accounts.find((a) => a.name.toLowerCase() === name.toLowerCase() && a.currency === c[1]);
     if (same) same.summary = cents(same.summary + bal.v);
     else accounts.push({ name, currency: c[1], summary: bal.v, txs: [], details: false });
@@ -738,11 +745,15 @@ function readCiti(lines) {
     let cur = null;
     for (let i = o + 1; i < c; i++) {
       const l = lines[i];
+      if (PAGE_NOISE.test(l.text)) continue;
       if (isOpen(l) || /CARRIED FORWARD|BALANCE C\/F|^TOTAL\b/i.test(l.text) || (/withdraw|debit/i.test(l.text) && /balance/i.test(l.text))) { cur = null; continue; }
       const d = TX_DATE.exec(l.text);
       if (d) {
-        const mon = d[2] ? monthIndex(d[2]) : +d[4], day = +(d[1] || d[3]);
-        cur = { date: isoDate(yearOf(mon), mon, day), desc: lineWithout(l).replace(TX_DATE, ''), amounts: [...l.amounts] };
+        const mon = d[2] ? monthIndex(d[2]) : d[3] ? monthIndex(d[3]) : +d[7];
+        const day = +(d[1] || d[4] || d[6]), year = d[5] ? +d[5] : yearOf(mon);
+        let desc = lineWithout(l).replace(TX_DATE, '');
+        while (TX_DATE.test(desc)) desc = desc.replace(TX_DATE, '');
+        cur = { date: isoDate(year, mon, day), desc, amounts: [...l.amounts] };
         txs.push(cur);
       } else if (l.amounts.length) {
         if (cur && !cur.amounts.length) { cur.amounts.push(...l.amounts); cur.desc += ' ' + lineWithout(l); }
@@ -760,7 +771,7 @@ function readCiti(lines) {
         }
       }
       if (amt == null && t.amounts.length >= 2) {
-        amt = t.amounts[0].v; printed = t.amounts.at(-1).v;
+        amt = t.amounts.at(-2).v; printed = t.amounts.at(-1).v;
         side = printed >= run ? 'c' : 'd';
       }
       if (amt == null) return fail(`Could not tell whether a ${t.date ? dayMonth(t.date) : ''} line in ${acc.name} was a withdrawal or a deposit.`);
@@ -770,6 +781,8 @@ function readCiti(lines) {
       acc.txs.push({ date: t.date, desc: t.desc.replace(/\s+/g, ' ').trim(), signed: side === 'c' ? amt : -amt, balance: run });
     }
     const worked = cents(acc.opening - debits + credits);
+    const totals = lines[c + 1] && /^TOTAL\b/i.test(lines[c + 1].text) && lines[c + 1].amounts.length === 2 ? lines[c + 1].amounts.map((a) => a.v) : null;
+    if (totals && (Math.abs(totals[0] - debits) > 0.005 || Math.abs(totals[1] - credits) > 0.005)) return fail(`${acc.name}: the statement's totals are withdrawals ${cur2(totals[0], acc.currency)} and deposits ${cur2(totals[1], acc.currency)}, but its lines add up to ${cur2(debits, acc.currency)} and ${cur2(credits, acc.currency)}. Nothing was filled.`);
     if (Math.abs(worked - acc.closing) > 0.005) return fail(`${acc.name} doesn't add up: opening ${cur2(acc.opening, acc.currency)} − withdrawals ${cur2(debits, acc.currency)} + deposits ${cur2(credits, acc.currency)} = ${cur2(worked, acc.currency)}, but the closing balance is ${cur2(acc.closing, acc.currency)}. Nothing was filled.`);
     if (Math.abs(acc.closing - acc.summary) > 0.005) return fail(`${acc.name}: the closing balance ${cur2(acc.closing, acc.currency)} doesn't match the summary's ${cur2(acc.summary, acc.currency)}. Nothing was filled.`);
   }
@@ -1349,7 +1362,17 @@ function showTab(name) {
 const currentTab = () => Object.keys(TABS).find((t) => !$('page-' + t).hidden) || 'overview';
 function paint() { stale = { overview: true, activity: true, update: true }; showTab(currentTab()); }
 // A save on one tab changes what the others show.
-const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a) => { const d = await f(...a); for (const t in stale) stale[t] = true; stale[currentTab()] = false; if (name === 'saveMonth') state.month = a[0].month; noteFresh(); return d; }; };
+// Activity and Update redraw themselves after their own saves; the Overview never saves, so it's
+// redrawn here if it's the tab on screen.
+const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a) => {
+  const d = await f(...a);
+  for (const t in stale) stale[t] = true;
+  if (name === 'saveMonth') state.month = a[0].month;
+  const on = currentTab();
+  if (on === 'overview') { stale.overview = false; showOverview(d); } else stale[on] = false;
+  noteFresh();
+  return d;
+}; };
 ['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings'].forEach(wrap);
 function noteFresh() { const m = api.data && api.data.months.at(-1); $('sync').textContent = m && m.updated_by && m.updated_by !== 'dashboard' ? 'Last saved by ' + memberName(m.updated_by) + (m.updated_at ? ', ' + clock(m.updated_at) : '') : ''; }
 
