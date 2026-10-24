@@ -83,8 +83,8 @@ makes the holding's cost unknown. The Overview shows Cost and Gain per holding; 
 combined line has no cost, the gain covers only the part that does. Next: prices fetched
 automatically.
 
-## Kraken ledger import
-"Import Kraken ledger" on the Activity tab reads Kraken's ledger export in the browser: the CSV
+## Exchange ledger import (Kraken and Binance)
+"Import exchange ledger" on the Activity tab reads Kraken's ledger export in the browser: the CSV
 (exact; columns refid, time, type, subtype, asset, wallet, amount, fee, balance, amountusd) or the
 PDF statement (amounts rounded to 4 decimal places, so differences under 0.0005 are ignored). Asset
 codes are normalised (`krakenCoin`: XXBT to BTC, ETH.F to ETH). A coin's balance on a day is the last
@@ -97,6 +97,13 @@ other account is chosen, or skipped), and anything else as a reward or fee. Entr
 `kraken:<refid>:<coin>`), so importing again proposes only what's new. `krakenHistory` shows
 month-end Kraken balances beside the ETH and BTC the tracker stored across all accounts, for
 correcting past months on the Update tab. The file is never uploaded or kept.
+
+Binance's transaction history CSV (`readBinanceCsv`: Time, Account, Operation, Coin, Change) has no
+balance column, so balances are added up from the first row in exact decimal (BigInt, 12 places)
+and the export must start at the account's first transaction; it's refused if a coin would go
+below zero. Rows at the same second form one trade (additions sorted before deductions). The
+User ID column is never read. The same plan, history and refs apply, with `binance:` refs and
+holdings whose account is Binance; the file type is detected from the CSV header.
 
 ## Citi statement import
 "Import Citi statement" on the Update tab reads a Citibank Singapore PDF statement entirely in the

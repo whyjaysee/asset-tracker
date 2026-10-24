@@ -1512,7 +1512,37 @@ function readKrakenCsv(text) {
   }));
   if (!entries.length) return { error: 'This ledger has no entries.' };
   if (entries.some((e) => !/^\d{4}-\d{2}-\d{2}$/.test(e.date) || !isFinite(e.amount) || !isFinite(e.balance))) return { error: 'Some rows of this ledger could not be read. Export it from Kraken again as CSV.' };
-  return { entries, precise: true };
+  return { entries, precise: true, source: 'Kraken' };
+}
+
+// Binance's transaction history (Time, Account, Operation, Coin, Change) has no running balance, so
+// balances are added up from the first row; the export must start at the account's first
+// transaction. Rows at the same second are one trade. The User ID column is never read.
+function readBinanceCsv(text) {
+  const rows = csvRows(text.replace(/^\uFEFF/, ''));
+  const head = (rows[0] || []).map((h) => h.trim().toLowerCase());
+  const at = (k) => head.indexOf(k);
+  if (['time', 'operation', 'coin', 'change'].some((k) => at(k) < 0)) return { error: "This doesn't look like a Binance transaction history export." };
+  const run = {};
+  const entries = rows.slice(1).map((r) => {
+    const op = r[at('operation')].trim(), coin = r[at('coin')].trim().toUpperCase(), amount = Number(r[at('change')]), time = r[at('time')].trim();
+    const wallet = (at('account') >= 0 ? r[at('account')] : 'spot').trim().toLowerCase();
+    const type = /^transaction|convert|small assets/i.test(op) ? 'trade' : /^deposit/i.test(op) ? 'deposit' : /^withdraw/i.test(op) ? 'withdrawal'
+      : /interest|reward|airdrop|distribution|cashback|bonus|staking/i.test(op) ? 'earn' : op.toLowerCase();
+    return { id: '', group: time, date: time.slice(0, 10), time, type, subtype: type === 'earn' ? 'reward' : op.toLowerCase(), code: coin, coin, wallet, amount, text: r[at('change')].trim(), fee: 0, usd: null, feeUsd: null };
+  }).sort((a, b) => a.time.localeCompare(b.time) || b.amount - a.amount);
+  if (!entries.length) return { error: 'This history has no entries.' };
+  if (entries.some((e) => !/^\d{4}-\d{2}-\d{2}/.test(e.date) || !isFinite(e.amount))) return { error: 'Some rows of this history could not be read. Export it from Binance again.' };
+  // Added up exactly, in units of 10^-12, so large counts such as BONK don't pick up rounding errors.
+  const exact = (n) => { const [w, f = ''] = String(n).replace('-', '').split('.'); const v = BigInt(w + f.padEnd(12, '0').slice(0, 12)); return String(n).startsWith('-') ? -v : v; };
+  const decimal = (v) => { const s = (v < 0n ? -v : v).toString().padStart(13, '0'); return Number(`${v < 0n ? '-' : ''}${s.slice(0, -12)}.${s.slice(-12)}`); };
+  for (const e of entries) {
+    const k = e.code + '|' + e.wallet;
+    run[k] = (run[k] || 0n) + exact(e.text);
+    e.balance = decimal(run[k]);
+    if (run[k] < -10000n) return { error: `This history doesn't start at your first Binance transaction (${e.coin} would go below zero on ${e.date}). Export every year, from when the account was opened.` };
+  }
+  return { entries, precise: true, source: 'Binance' };
 }
 
 function readKrakenPdf(lines) {
@@ -1528,7 +1558,7 @@ function readKrakenPdf(lines) {
     else if (cur && /^\d{2}:\d{2}:\d{2}/.test(l.text)) { cur.time = `${cur.date} ${l.text.slice(0, 8)}`; if (!cur.subtype) cur.subtype = l.text.slice(8).trim().toLowerCase(); }
   }
   if (!out.length || out.some((e) => !e.code)) return { error: 'Some entries in this PDF could not be read. Export the ledger from Kraken as CSV instead.' };
-  return { entries: out.map((e) => ({ ...e, group: `${e.time} ${e.type}`, usd: null, feeUsd: null })), precise: false };
+  return { entries: out.map((e) => ({ ...e, group: `${e.time} ${e.type}`, usd: null, feeUsd: null })), precise: false, source: 'Kraken' };
 }
 
 // Kraken's balance of each coin at the end of a day: the last resulting balance of every asset and
@@ -1549,10 +1579,10 @@ function krakenTotals(entries, day) {
 // holding's start: the opening corrected, staking rewards one per month, trades, deposits and
 // withdrawals (the other account is chosen), and anything else as a reward or fee.
 function krakenPlan(d, k) {
-  const first = k.entries[0].date, last = k.entries.at(-1).date;
+  const first = k.entries[0].date, last = k.entries.at(-1).date, src = k.source, pre = src.toLowerCase();
   const moves = d.movements || [];
   const byRef = Object.fromEntries(moves.filter((v) => v.ref).map((v) => [v.ref, v]));
-  const holdings = d.items.filter((i) => i.kind === 'holding' && /kraken/i.test(i.source || '') && moves.some((v) => v.item_id === i.id));
+  const holdings = d.items.filter((i) => i.kind === 'holding' && i.source && i.source.toLowerCase().includes(pre) && moves.some((v) => v.item_id === i.id));
   const coins = new Set(k.entries.map((e) => e.coin));
   // The PDF rounds to 4 decimal places, so smaller differences are rounding, not changes.
   const tol = k.precise ? 1e-9 : 5e-4;
@@ -1567,8 +1597,8 @@ function krakenPlan(d, k) {
     row.trackerStart = unitsAt(d, h.id, start) || 0;
     const diff = r10(row.ledgerStart - row.trackerStart);
     if (opening && Math.abs(diff) > tol && first <= start) {
-      changes.push({ h, coin, date: start, delta: diff, on: true, label: `Opening on ${dayMonth(start)}: Kraken had ${plain(row.ledgerStart, 8)}, the tracker has ${plain(row.trackerStart, 8)}`, update: { id: opening.id, units: r10(Number(opening.units) + diff) } });
-    } else if (Math.abs(diff) > tol) notes.push(`${coin}: Kraken had ${plain(row.ledgerStart, 8)} on ${dayMonth(start)} but the tracker has ${plain(row.trackerStart, 8)}. This file starts after then, so the opening wasn't changed.`);
+      changes.push({ h, coin, date: start, delta: diff, on: true, label: `Opening on ${dayMonth(start)}: ${src} had ${plain(row.ledgerStart, 8)}, the tracker has ${plain(row.trackerStart, 8)}`, update: { id: opening.id, units: r10(Number(opening.units) + diff) } });
+    } else if (Math.abs(diff) > tol) notes.push(`${coin}: ${src} had ${plain(row.ledgerStart, 8)} on ${dayMonth(start)} but the tracker has ${plain(row.trackerStart, 8)}. This file starts after then, so the opening wasn't changed.`);
 
     const groups = new Map();
     for (const e of k.entries) if (e.coin === coin && e.date > start) { if (!groups.has(e.group)) groups.set(e.group, []); groups.get(e.group).push(e); }
@@ -1578,7 +1608,7 @@ function krakenPlan(d, k) {
       if (Math.abs(net) < 1e-12) continue;
       const date = es.at(-1).date, type = es[0].type, sub = es[0].subtype;
       const usd = es.every((e) => e.usd != null) ? es.reduce((t, e) => t + e.usd - (e.feeUsd || 0), 0) : null;
-      const ref = `kraken:${g}:${coin}`;
+      const ref = `${pre}:${g}:${coin}`;
       if ((type === 'earn' && sub === 'reward') || type === 'staking') {
         const m = date.slice(0, 7), r = rewards[m] || (rewards[m] = { units: 0, usd: 0, priced: true, date });
         r.units = r10(r.units + net); r.date = date;
@@ -1589,7 +1619,7 @@ function krakenPlan(d, k) {
         const amount = cash ? Math.abs(cash.amount) : usd != null ? Math.abs(usd) : null, fee = cash ? cash.fee : 0;
         const t = net > 0 ? 'buy' : 'sell';
         changes.push({ h, coin, date, delta: net, on: true, label: `${t === 'buy' ? 'Bought' : 'Sold'} ${plain(Math.abs(net), 8)} ${coin}${amount != null ? ` for US$${nf2.format(amount)}` : ''}, ${dayMonth(date)}`,
-          add: { date, type: t, item_id: h.id, units: Math.abs(net), amount, fee, note: `Kraken ${t === 'buy' ? 'buy' : 'sale'}`, ref } });
+          add: { date, type: t, item_id: h.id, units: Math.abs(net), amount, fee, note: `${src} ${t === 'buy' ? 'buy' : 'sale'}`, ref } });
       } else if (['deposit', 'withdrawal', 'transfer'].includes(type)) {
         if (byRef[ref]) continue;
         const others = d.items.filter((i) => i.kind === 'holding' && i.id !== h.id && String(i.name).toUpperCase() === coin);
@@ -1597,23 +1627,24 @@ function krakenPlan(d, k) {
       } else {
         if (byRef[ref]) continue;
         changes.push({ h, coin, date, delta: net, on: true, label: `${type}${sub ? ' ' + sub : ''}: ${net > 0 ? '+' : '−'}${plain(Math.abs(net), 8)} ${coin}, ${dayMonth(date)}`,
-          add: { date, type: net > 0 ? 'reward' : 'fee', item_id: h.id, units: Math.abs(net), amount: net > 0 && usd != null ? Math.abs(usd) : null, note: `Kraken ${type}${sub ? ' ' + sub : ''}`, ref } });
+          add: { date, type: net > 0 ? 'reward' : 'fee', item_id: h.id, units: Math.abs(net), amount: net > 0 && usd != null ? Math.abs(usd) : null, note: `${src} ${type}${sub ? ' ' + sub : ''}`, ref } });
       }
     }
     for (const [m, r] of Object.entries(rewards)) {
-      const ref = `kraken:reward:${coin}:${m}`, have = byRef[ref], amount = r.priced ? cents(r.usd) : null;
-      const label = `Staking, ${monthLong(m)}: +${plain(r.units, 8)} ${coin}${amount != null ? ` (US$${nf2.format(amount)})` : ''}`;
-      if (!have) changes.push({ h, coin, date: r.date, delta: r.units, on: true, label, add: { date: r.date, type: 'reward', item_id: h.id, units: r.units, amount, note: `Kraken staking, ${monthLong(m)}`, ref } });
+      const ref = `${pre}:reward:${coin}:${m}`, have = byRef[ref], amount = r.priced ? cents(r.usd) : null;
+      const label = `${src === 'Kraken' ? 'Staking' : 'Rewards'}, ${monthLong(m)}: +${plain(r.units, 8)} ${coin}${amount != null ? ` (US$${nf2.format(amount)})` : ''}`;
+      if (!have) changes.push({ h, coin, date: r.date, delta: r.units, on: true, label, add: { date: r.date, type: 'reward', item_id: h.id, units: r.units, amount, note: `${src} ${src === 'Kraken' ? 'staking' : 'rewards'}, ${monthLong(m)}`, ref } });
       else if (Math.abs(Number(have.units) - r.units) > Math.max(tol, 1e-10)) changes.push({ h, coin, date: r.date, delta: r10(r.units - Number(have.units)), on: true, label: `${label}, was +${plain(Number(have.units), 8)}`, update: { id: have.id, units: r.units, date: r.date, amount } });
     }
-    row.ledgerNow = krakenTotals(k.entries, last)[coin] || 0;
-    row.trackerNow = unitsAt(d, h.id, last) || 0;
+    row.end = last > start ? last : start;
+    row.ledgerNow = krakenTotals(k.entries, row.end)[coin] || 0;
+    row.trackerNow = unitsAt(d, h.id, row.end) || 0;
   }
   const tracked = new Set(rows.map((r) => r.coin));
   const held = krakenTotals(k.entries, last);
   const extra = Object.entries(held).filter(([c, v]) => v > 1e-8 && !tracked.has(c));
-  if (extra.length) notes.push(`Kraken also holds ${extra.map(([c, v]) => `${plain(v, 8)} ${c}`).join(', ')}, which ${extra.length === 1 ? "isn't" : "aren't"} a Kraken holding in the tracker.`);
-  return { first, last, rows, changes, notes, precise: k.precise };
+  if (extra.length) notes.push(`${src} also holds ${extra.map(([c, v]) => `${plain(v, 8)} ${c}`).join(', ')}, which ${extra.length === 1 ? "isn't" : "aren't"} a ${src} holding in the tracker.`);
+  return { first, last, rows, changes, notes, precise: k.precise, src };
 }
 
 // Month-end Kraken balances, with the stored units of ETH and BTC across all accounts beside them.
@@ -1637,7 +1668,8 @@ async function importKraken(file) {
   showKraken({ busy: true });
   let k;
   try {
-    k = /\.pdf$/i.test(file.name) || file.type === 'application/pdf' ? readKrakenPdf(await pdfLines(new Uint8Array(await file.arrayBuffer()))) : readKrakenCsv(await file.text());
+    if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') k = readKrakenPdf(await pdfLines(new Uint8Array(await file.arrayBuffer())));
+    else { const text = await file.text(), top = text.slice(0, 300).toLowerCase(); k = top.includes('operation') && top.includes('change') ? readBinanceCsv(text) : readKrakenCsv(text); }
   } catch (e) { k = { error: `Could not read that file (${e && e.message ? e.message : e}).` }; }
   if (k.error) return showKraken(k);
   k.entries.sort((a, b) => (a.time || a.date).localeCompare(b.time || b.date));
@@ -1664,14 +1696,14 @@ function showKraken(s) {
     : '<p>The tracker already matches this ledger. Nothing to change.</p>';
   const canSave = hasRefs(api.data);
   const h = s.history;
-  const histHtml = h.rows.length > 1 ? `<details><summary>Kraken month by month</summary>
-    <p class="hint">Kraken's balance of each coin at the end of each month. For ETH and BTC, "all accounts" is what the tracker stored for that month across every account, so the difference was held elsewhere, such as on Ledger.</p>
+  const histHtml = h.rows.length > 1 ? `<details><summary>${p.src} month by month</summary>
+    <p class="hint">${p.src}'s balance of each coin at the end of each month. For ETH and BTC, "all accounts" is what the tracker stored for that month across every account, so the difference was held elsewhere, such as on Ledger.</p>
     <div class="scroll"><table><tr><th>Month</th>${h.coins.map((c) => `<th>${esc(c)}</th>${['ETH', 'BTC'].includes(c) ? `<th>${esc(c)}, all accounts</th>` : ''}`).join('')}</tr>
     ${[...h.rows].reverse().map((r) => `<tr><td>${monthShort(r.month)}</td>${h.coins.map((c) => `<td>${r.t[c] ? plain(r.t[c], p.precise ? 8 : 4) : ''}</td>${['ETH', 'BTC'].includes(c) ? `<td class="muted">${r.stored && r.stored[c] != null ? plain(r.stored[c], 8) : ''}</td>` : ''}`).join('')}</tr>`).join('')}</table></div></details>` : '';
-  el.innerHTML = `<h2>Kraken ledger, ${dayMonth(p.first)} ${p.first.slice(0, 4)} to ${dayMonth(p.last)} ${p.last.slice(0, 4)}</h2>
+  el.innerHTML = `<h2>${p.src} ledger, ${dayMonth(p.first)} ${p.first.slice(0, 4)} to ${dayMonth(p.last)} ${p.last.slice(0, 4)}</h2>
     ${p.precise ? '' : '<p class="err">This PDF rounds amounts to 4 decimal places, so small differences can remain. The CSV export is exact.</p>'}
-    <div class="scroll"><table><tr><th class="desc">Holding</th><th>Kraken at start</th><th>Tracker at start</th><th>Kraken at end</th><th>Tracker after these changes</th></tr>${rowsHtml}</table></div>
-    <p class="hint">"Start" is each holding's opening date; "end" is the last day in the file.</p>
+    <div class="scroll"><table><tr><th class="desc">Holding</th><th>${p.src} at start</th><th>Tracker at start</th><th>${p.src} at end</th><th>Tracker after these changes</th></tr>${rowsHtml}</table></div>
+    <p class="hint">"Start" is each holding's opening date; "end" is the last day in the file, or the opening date if the file ends before it.</p>
     ${p.notes.map((n) => `<p class="err">${esc(n)}</p>`).join('')}
     <h3>Changes</h3>${changesHtml}
     <p class="actions">${p.changes.length && canSave ? `<button class="btn primary" type="button" data-kraken="save" ${on.length ? '' : 'disabled'}>Save ${on.length} ${on.length === 1 ? 'change' : 'changes'}</button> ` : ''}${close}</p>
@@ -1684,7 +1716,7 @@ async function saveKraken() {
   const update = on.filter((c) => c.update).map((c) => c.update);
   const add = on.filter((c) => c.add).map((c) => c.add).concat(on.filter((c) => c.transfer).map((c) => {
     const x = c.transfer.choice, out = c.delta < 0;
-    return { date: c.date, type: 'transfer', item_id: out ? c.h.id : x, to_item_id: out ? x : c.h.id, units: Math.abs(c.delta), note: `Kraken ${out ? 'withdrawal' : 'deposit'}`, ref: c.transfer.ref };
+    return { date: c.date, type: 'transfer', item_id: out ? c.h.id : x, to_item_id: out ? x : c.h.id, units: Math.abs(c.delta), note: `${kraken.plan.src} ${out ? 'withdrawal' : 'deposit'}`, ref: c.transfer.ref };
   }));
   try {
     await api.applyMovements({ update, add });
