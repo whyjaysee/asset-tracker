@@ -251,7 +251,8 @@ function cryptoGroups(lines) {
     x.ids.push(l.item.id);
     if (l.item.kind === 'holding') { x.units += l.amount; x.usd += l.amount * (l.price || 0); } else x.unitsKnown = false;
     const a = l.item.source || 'Other';
-    const p = x.parts[a] || (x.parts[a] = { account: a, value: 0, units: 0 });
+    const p = x.parts[a] || (x.parts[a] = { account: a, value: 0, units: 0, ids: [] });
+    p.ids.push(l.item.id);
     p.value += l.value;
     if (l.item.kind === 'holding') p.units += l.amount;
     const coin = l.item.kind === 'holding' ? l.item.name : `${l.item.name} (all coins)`;
@@ -273,7 +274,10 @@ function renderHoldings() {
     if (!tracked.length) return null;
     const known = tracked.filter((id) => !costs[id].unknown);
     const sgd = (id) => { const it = api.data.items.find((i) => i.id === id); return it.currency === 'USD' ? costs[id].cost / r.fx : costs[id].cost; };
-    return { cost: known.reduce((t, id) => t + sgd(id), 0), value: known.reduce((t, id) => t + (valueOf[id] || 0), 0), partial: known.length < ids.length, none: !known.length };
+    const usd = known.every((id) => api.data.items.find((i) => i.id === id).currency === 'USD');
+    const units = known.reduce((t, id) => t + costs[id].units, 0);
+    return { cost: known.reduce((t, id) => t + sgd(id), 0), value: known.reduce((t, id) => t + (valueOf[id] || 0), 0), partial: known.length < ids.length, none: !known.length,
+      avg: usd && units > 0 && !(known.length < ids.length) ? known.reduce((t, id) => t + costs[id].cost, 0) / units : null };
   };
   const crypto = cryptoGroups(shown.filter((l) => l.item.category === 'crypto')).map((g) => ({
     item: { name: g.name !== 'Others' ? g.name : Object.keys(g.coins).some((c) => c.endsWith('(all coins)')) ? 'Other crypto' : `Other crypto (${Object.keys(g.coins).length})`, category: 'crypto', kind: g.unitsKnown ? 'holding' : 'group' },
@@ -282,7 +286,7 @@ function renderHoldings() {
   const lines = shown.filter((l) => l.item.category !== 'crypto').map((l) => ({ ...l, cost: l.item.kind === 'holding' ? costOf([l.item.id]) : null }))
     .concat(crypto).sort((a, b) => order[a.item.category] - order[b.item.category] || b.value - a.value);
   const anyCost = lines.some((l) => l.cost != null);
-  $('holdings').innerHTML = `<tr><th>Holding</th><th>Units</th><th>Price</th><th>Value</th>${anyCost ? '<th>Cost</th><th>Gain</th>' : ''}<th>Share</th></tr>` + lines.map((l) => {
+  $('holdings').innerHTML = `<tr><th>Holding</th><th>Units</th><th>Price</th>${anyCost ? '<th>Avg cost</th>' : ''}<th>Value</th>${anyCost ? '<th>Cost</th><th>Gain</th>' : ''}<th>Share</th></tr>` + lines.map((l) => {
     const h = l.item.kind === 'holding';
     const native = l.item.currency === 'USD' && l.item.kind === 'balance' ? ` <span class="muted">US$${plain(l.amount, 0)}</span>` : '';
     const c = l.cost, g = c && c.value - c.cost;
@@ -290,8 +294,9 @@ function renderHoldings() {
     const gain = !c || c.none ? '' : `<span class="${g >= 0 ? 'up' : 'down'}">${signed(g)}</span>${c.partial ? ' <span class="muted">on part</span>' : ''}`;
     return `<tr><td><span class="dot" style="--c:var(--${l.item.category})"></span>${esc(l.item.name)}${native}</td>
       <td>${h ? plain(l.amount, 4) : ''}</td><td>${h && l.price != null ? 'US$' + plain(l.price, tiny(l.price, 2)) : ''}</td>
+      ${anyCost ? `<td>${h && c && c.avg != null ? 'US$' + plain(c.avg, tiny(c.avg, 2)) : ''}</td>` : ''}
       <td>${money(l.value)}</td>${anyCost ? `<td>${cost}</td><td>${gain}</td>` : ''}<td class="muted">${pct(l.value / r.net)}</td></tr>`;
-  }).join('') + `<tr><td class="muted" colspan="${anyCost ? 7 : 5}" style="border:0;white-space:normal">US$ converted at S$1 = US$${r.fx}. Crypto is combined across accounts; ETH and BTC prices are averages.${anyCost ? ' Cost is what was paid, by average cost, from the Activity tab. Where part of a line has no recorded cost, the gain covers only the part that does.' : ''}</td></tr>`;
+  }).join('') + `<tr><td class="muted" colspan="${anyCost ? 8 : 5}" style="border:0;white-space:normal">US$ converted at S$1 = US$${r.fx}. Crypto is combined across accounts; ETH and BTC prices and average costs are blended across them (each account's own is under Crypto by coin).${anyCost ? ' Cost is what each account paid for what it holds, by average cost, from the Activity tab. Where part of a line has no recorded cost, the gain covers only the part that does.' : ''}</td></tr>`;
 }
 
 function renderFlow() {
@@ -457,6 +462,14 @@ function renderCoins() {
   const accounts = Object.keys(byAccount).sort((a, b) => byAccount[b] - byAccount[a]);
   const color = (a) => `var(--acct-${(accounts.indexOf(a) % 5) + 1})`;
   const list = cryptoGroups(lines), max = Math.max(...list.map((g) => g.value), 1);
+  // Each account's own average cost per coin (US$), where its cost is known.
+  const costs = r.month > FROZEN_UNTIL ? costsAt(api.data, monthEnd(r.month)) : {};
+  const avgOf = (ids) => {
+    const cs = ids.map((id) => costs[id]);
+    if (!cs.length || cs.some((c) => !c || c.unknown)) return null;
+    const u = cs.reduce((t, c) => t + c.units, 0);
+    return u > 0 ? cs.reduce((t, c) => t + c.cost, 0) / u : null;
+  };
   $('coins-title').textContent = `Crypto by coin, ${monthLong(r.month)}`;
   $('coins-legend').innerHTML = accounts.map((a) => `<span class="legend" style="--c:${color(a)}"><span class="dot"></span>${esc(a)} ${money(byAccount[a])}</span>`).join('');
   $('coins').innerHTML = list.map((g) => {
@@ -470,7 +483,7 @@ function renderCoins() {
       <div class="coinbar" role="img" aria-label="${esc(g.name)}: ${esc(where)}"><div style="width:${(Math.max(g.value, 0) / max * 100).toFixed(2)}%">${parts.map((p) =>
         `<span style="--c:${color(p.account)};flex:${Math.max(p.value, 0)}" title="${esc(p.account)}: ${g.unitsKnown ? plain(p.units, 6) + ' ' + esc(g.name) + ', ' : ''}${money(p.value)}"></span>`).join('')}</div></div>
       <div class="coinval">${money(g.value)} <span class="muted">${pct(g.value / total)}</span></div>
-      <div class="coinparts">${parts.map((p) => `<span><span class="dot" style="--c:${color(p.account)}"></span>${esc(p.account)} ${units(p)} <span class="muted">${money(p.value)}</span></span>`).join(' &nbsp; ')}</div>
+      <div class="coinparts">${parts.map((p) => { const a = g.unitsKnown ? avgOf(p.ids) : null; return `<span><span class="dot" style="--c:${color(p.account)}"></span>${esc(p.account)} ${units(p)} <span class="muted">${money(p.value)}${a != null ? ` · avg US$${plain(a, tiny(a, 2))}` : ''}</span></span>`; }).join(' &nbsp; ')}</div>
       ${inside}
     </div>`;
   }).join('');
