@@ -18,7 +18,7 @@ My data is in my Supabase project "personal finance" (id yushkredjvgjmbnhnfsl), 
 - nw_owed: money owed back to me. Each row is a payment I made that will be given back (positive amount, S$) or a repayment (negative). The cash item "House payments to be repaid" is worth payments minus repayments up to each month's end; I'm buying a house and the cash payments are being given back to me
 Call public.nw_load() to get everything as one JSON object, movements and owed included. History runs Jul-20 to Aug-26 and is frozen as imported.
 
-Known quirks: the external ETH holding has no recorded cost basis, so crypto returns are overstated; Dec-21 shows a cash inflow that wasn't income; Jan-24 jumps when the external ETH was first recorded.
+Known quirks: crypto from Jul-20 to Aug-26 was reconciled on 24 Oct 2026 from the Kraken, Binance and Ledger ledgers and is stored per account (ETH and BTC at Kraken, Ledger and Binance; "Exchange cash" is US$ cash on Kraken; the Binance total from Sep-24 is its exact month-end value, with Binance's ETH and BTC inside it). Kraken figures start in Sep-20, the start of its export. Small Kraken coins (ETHW, SOL, USDT, USDC, BABY) aren't in months before Sep-26. ETH on Ledger has no recorded cost basis; stock_added and crypto_added don't cover the reconciled crypto, so returns from them are unreliable before Sep-26. Dec-21 shows a cash inflow that wasn't income.
 
 The Google Sheet with my individual stock positions is SHEET_LINK_HERE (tab "Stock Portfolio").
 

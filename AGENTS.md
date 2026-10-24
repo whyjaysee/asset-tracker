@@ -17,7 +17,9 @@ backed by Supabase. Read this before changing anything.
 - **Database changes go in a new numbered file** in `supabase/` (next is `007_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
-  or rewritten. Change how things are shown, not the stored past.
+  or rewritten. Change how things are shown, not the stored past. Only the owners correct past
+  months, through the site, from source documents; the crypto lines were reconciled that way from
+  the Kraken, Binance and Ledger ledgers on 24 Oct 2026 (now per account), after a full backup.
 
 ## Files
 | File | Role |
