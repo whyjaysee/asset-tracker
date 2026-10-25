@@ -149,6 +149,14 @@ const api = {
   saveLoan(d) { return this.rpc('nw_save_loan', { d }); },
   deleteLoan(id) { return this.rpc('nw_delete_loan', { l_id: id }); },
   deleteOwed(id) { return this.rpc('nw_delete_owed', { o_id: id }); },
+  saveExpenses(d) { return this.rpc('nw_save_expenses', { d }); },
+  updateExpenses(list) { return this.rpc('nw_update_expenses', { d: list }); },
+  deleteExpenses(d) { return this.rpc('nw_delete_expenses', { d }); },
+  saveTrip(d) { return this.rpc('nw_save_trip', { d }); },
+  deleteTrip(id) { return this.rpc('nw_delete_trip', { t_id: id }); },
+  saveRule(d) { return this.rpc('nw_save_rule', { d }); },
+  deleteRule(id) { return this.rpc('nw_delete_rule', { r_id: id }); },
+  applyRule(id) { return this.rpc('nw_apply_rule', { r_id: id }); },
 };
 function memberName(email) {
   const m = api.data && (api.data.members || []).find((x) => x.email === email);
@@ -2075,9 +2083,27 @@ function renderDueSoon(d) {
     ${alerts.map((a) => `<li class="alert">${esc(a.text)}</li>`).join('')}</ul>`;
 }
 
+// ---------- spending: itemised card and bank outflows ----------
+// Rows, trips, rules and statements come from 008_spending.sql; every total is worked out here.
+const SPEND_SOURCES = { citi_card: 'Citi cards', uob_card: 'UOB cards', citi_bank: 'Citibank account', manual: 'Added by hand' };
+
+function showSpending(d) {
+  const on = Array.isArray(d.expenses);
+  $('spend-off').hidden = on;
+  $('spend-body').hidden = !on;
+  if (!on) return;
+  const rows = d.expenses, stmts = d.statements;
+  $('spend-summary').textContent = rows.length
+    ? `${rows.length.toLocaleString('en-SG')} transactions, ${monthLong(rows[0].date.slice(0, 7))} to ${monthLong(rows.at(-1).date.slice(0, 7))}.`
+    : 'Nothing imported yet.';
+  $('spend-statements').hidden = !stmts.length;
+  $('spend-statements').innerHTML = stmts.length ? `<tr><th>From</th><th>Card</th><th>Period</th><th>Lines</th></tr>` + stmts.slice().reverse().map((s) =>
+    `<tr><td>${SPEND_SOURCES[s.source] || esc(s.source)}</td><td>${esc(s.card)}</td><td>${longDate(s.period_start)} to ${longDate(s.period_end)}</td><td>${s.lines == null ? '' : s.lines}</td></tr>`).join('') : '';
+}
+
 // ---------- tabs and start-up ----------
-const TABS = { overview: showOverview, activity: showActivity, home: showHome, update: showUpdate };
-let stale = { overview: true, activity: true, home: true, update: true };
+const TABS = { overview: showOverview, activity: showActivity, spending: showSpending, home: showHome, update: showUpdate };
+let stale = { overview: true, activity: true, spending: true, home: true, update: true };
 function showTab(name) {
   for (const t of Object.keys(TABS)) {
     $('page-' + t).hidden = t !== name;
@@ -2088,7 +2114,7 @@ function showTab(name) {
   if (api.data && stale[name]) { stale[name] = false; TABS[name](api.data); }
 }
 const currentTab = () => Object.keys(TABS).find((t) => !$('page-' + t).hidden) || 'overview';
-function paint() { stale = { overview: true, activity: true, home: true, update: true }; showTab(currentTab()); }
+function paint() { stale = { overview: true, activity: true, spending: true, home: true, update: true }; showTab(currentTab()); }
 // A save on one tab changes what the others show.
 // Activity and Update redraw themselves after their own saves; the Overview never saves, so it's
 // redrawn here if it's the tab on screen.
@@ -2102,7 +2128,8 @@ const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a)
   return d;
 }; };
 ['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings', 'saveOwed', 'deleteOwed', 'applyMovements',
-  'saveCommitment', 'payCommitment', 'deleteCommitment', 'saveLoan', 'deleteLoan'].forEach(wrap);
+  'saveCommitment', 'payCommitment', 'deleteCommitment', 'saveLoan', 'deleteLoan',
+  'saveExpenses', 'updateExpenses', 'deleteExpenses', 'saveTrip', 'deleteTrip', 'saveRule', 'deleteRule', 'applyRule'].forEach(wrap);
 function noteFresh() { const m = api.data && api.data.months.at(-1); $('sync').textContent = m && m.updated_by && m.updated_by !== 'dashboard' ? 'Last saved by ' + memberName(m.updated_by) + (m.updated_at ? ', ' + clock(m.updated_at) : '') : ''; }
 
 

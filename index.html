@@ -12,7 +12,7 @@
   <span class="name">Net worth</span>
   <span class="sync" id="sync"></span>
   <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="addpasskey" hidden>Add passkey</button><button type="button" id="signout">Sign out</button></span>
-  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-activity">Activity</button><button type="button" id="tab-home">Home</button><button type="button" id="tab-update">Update</button></nav>
+  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-activity">Activity</button><button type="button" id="tab-spending">Spending</button><button type="button" id="tab-home">Home</button><button type="button" id="tab-update">Update</button></nav>
 </header>
 <section class="signin" id="signin" hidden>
   <h1>Net worth</h1>
@@ -161,6 +161,18 @@
     <p class="hint" id="owed-none">Nothing recorded yet.</p>
     <div class="scroll"><table id="owed-list"></table></div>
   </section>
+</div>
+<div id="page-spending" hidden>
+  <div class="updatehead"><h1>Spending</h1></div>
+  <p class="hint">Every card and bank payment, by category, month and trip. The Overview's spending is worked out from cash; this is the itemised view.</p>
+  <p class="empty" id="spend-off" hidden>The Spending tab isn't switched on in the database yet. Run <code>supabase/008_spending.sql</code> in the Supabase SQL Editor, then reload.</p>
+  <div id="spend-body" hidden>
+    <section>
+      <h2 class="acttitle">Imported</h2>
+      <p class="hint" id="spend-summary"></p>
+      <div class="scroll"><table id="spend-statements" hidden></table></div>
+    </section>
+  </div>
 </div>
 <div id="page-home" hidden>
   <div class="updatehead"><h1>Home</h1></div>

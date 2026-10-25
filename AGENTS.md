@@ -14,7 +14,7 @@ backed by Supabase. Read this before changing anything.
   the last release with a UMD build). They're vendored on purpose so the site loads nothing from
   other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
   `isEvalSupported: false`.
-- **Database changes go in a new numbered file** in `supabase/` (next is `008_...sql`), written
+- **Database changes go in a new numbered file** in `supabase/` (next is `009_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
   or rewritten. Change how things are shown, not the stored past. Only the owners correct past
@@ -25,16 +25,17 @@ included), after a full backup.
 ## Files
 | File | Role |
 |---|---|
-| `index.html` | Markup: header, sign-in screen, Overview, Activity, Home and Update tabs |
+| `index.html` | Markup: header, sign-in screen, Overview, Activity, Spending, Home and Update tabs |
 | `styles.css` | All styling. Colour tokens at the top, light and dark |
 | `js/config.js` | Supabase URL and anon key; Saxo app key (empty = Saxo sync off) |
-| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); Home (`amortise`, `renderCommitments`, `renderLoan`, `renderDueSoon`, ...); tabs; sign-in and start-up |
+| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); Home (`amortise`, `renderCommitments`, `renderLoan`, `renderDueSoon`, ...); Spending (`showSpending`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
 | `supabase/005_owed.sql` | Money owed back table, `nw_save_owed`, `nw_delete_owed`, and `nw_load` with owed |
 | `supabase/006_reconcile.sql` | Movement `ref`, `nw_apply_movements` (change, delete and add movements in one go), and `nw_load` with refs |
 | `supabase/007_home.sql` | Commitments, loans and rate periods; `nw_save_commitment`, `nw_pay_commitment`, `nw_delete_commitment`, `nw_save_loan`, `nw_delete_loan`; and `nw_load` with commitments and loans |
+| `supabase/008_spending.sql` | Expenses, trips, rules and statements; `nw_save_expenses`, `nw_update_expenses`, `nw_delete_expenses`, `nw_save_trip`, `nw_delete_trip`, `nw_save_rule`, `nw_delete_rule`, `nw_apply_rule`; and `nw_load` with them |
 | `docs/portfolio-analysis-prompt.md` | Prompt for a separate, read-only analysis chat. Keep its table descriptions in step with any schema change |
 | `.github/workflows/keep-alive.yml` | Pings `nw_ping()` twice a week so the free project doesn't pause |
 
@@ -65,6 +66,19 @@ included), after a full backup.
   card only), `note`.
 - `nw_loan_rates`: a loan's rate periods. `rate` (% a year) applies from `from_date` until the next
   period starts; `lock_in_end` is optional. Unique per (`loan_id`, `from_date`); deleted with the loan.
+- `nw_expenses`: one card or bank transaction. `date` (transaction date), `posted`, `source`
+  citi_card|uob_card|citi_bank|manual, `card` (a label such as "Citi Rewards", never a number),
+  `description` (scrubbed statement text), `merchant` (normalised key), `amount` (S$, positive =
+  money out, negative = refund), `fx_currency`, `fx_amount`, `country` (ISO-2), `category`,
+  `subcategory`, `kind` recurring|travel|one_off|reimbursed|excluded, `reimbursed` (S$ paid back),
+  `trip_id`, `labelled_by` rule|guess|user, `statement` (e.g. `citi_card:2026-03`), `statement_id`,
+  `ref` (unique dedupe key), `note`.
+- `nw_trips`: `name`, `start_date`, `end_date`, `note`.
+- `nw_expense_rules`: `pattern` (case-insensitive regex on the merchant key and description),
+  `category`, `subcategory`, `kind` (null = leave as detected), `priority` (lower runs first), `note`.
+- `nw_statements`: one per imported statement (per card on a combined card statement): `source`,
+  `card`, `period_start`, `period_end`, `purchases`, `credits`, `lines`, `imported_at`. Unique per
+  (`source`, `card`, `period_start`, `period_end`).
 
 ## Home: commitments and mortgage
 The Home tab (`showHome`) is hidden behind a one-line note until `007_home.sql` has been run
@@ -97,6 +111,34 @@ schedule in a collapsed `<details>`. With `cpf_monthly` 0 the CPF lines and colu
 and the whole instalment counts as cash. Within 90 days of the current period's `lock_in_end`
 (`repricing()`), it shows a repricing alert. The Overview's "Due soon" card (`renderDueSoon`, hidden
 when empty) lists planned commitments due within 90 days, nearest first, plus that alert.
+
+## Spending
+The Spending tab (`showSpending`) is the itemised view of card and bank outflows, beside the
+inferred spending in `compute()`, which stays as it is. It's hidden behind a one-line note until
+`008_spending.sql` has been run (`nw_load()` then has `expenses`, `trips`, `expense_rules` and
+`statements`). Built in phases: the tables and functions are in; statement importers (Citi card
+PDF, UOB card `.xls`, Citibank account outflows), categorisation and the analysis views come next.
+Every total, average, standout and trip table is worked out in the browser; nothing derived is
+stored.
+
+- **Never store or show a card or account number, or a `Ref No`.** The importers drop them and
+  statement text goes through `scrub()`. As a backstop, the description, merchant, card and note
+  columns (and the functions that write them) refuse any run of 8 or more digits.
+- **Never commit** a statement, an export, a transaction, a merchant name taken from real data,
+  or any figure. Built-in rules use generic names only (chains, airlines, apps, government
+  bodies); personal rules live in `nw_expense_rules`.
+- `nw_save_expenses` takes `{ statement, rows }` or a list of them, all or nothing. A statement
+  already imported (same source, card and period) is reused; a row whose `ref` exists is skipped,
+  so importing a file twice adds nothing and a user's edits survive. It returns `nw_load()` plus
+  `added` and `skipped`. `nw_delete_expenses({ statement_id })` undoes an import.
+- `nw_update_expenses` changes only the fields given and sets `labelled_by = 'user'`; rules never
+  touch those rows. `nw_apply_rule` re-categorises rows the rule matches, except user-labelled
+  rows and rows an earlier rule (lower priority, then lower id) matches. Rule patterns are tested
+  in both JavaScript and Postgres, so keep to syntax both share.
+- Travel rows inside a trip's dates are linked to it (`nw_link_trips`, internal) on import, on
+  saving a trip and on applying a rule, unless the user labelled them. `nw_save_trip` with
+  `expense_ids` moves rows to a trip by hand (for bookings paid ahead); shrinking a trip unlinks
+  automatic rows that fall outside it.
 
 ## Money owed back
 House payments (and anything else paid out that will be given back) go in `nw_owed`, not as
@@ -185,7 +227,11 @@ switches off the totals they replace, all or nothing), `nw_save_owed(d jsonb)`, 
 `nw_apply_movements(d jsonb)` (`{ delete, update, add }`, all or nothing; adds with an existing ref are skipped),
 `nw_save_commitment(d jsonb)`, `nw_pay_commitment(c_id bigint, paid_on date)` (refuses one already
 paid), `nw_delete_commitment(c_id bigint)`, `nw_save_loan(d jsonb)` (the loan plus its `rates`
-list, all or nothing) and `nw_delete_loan(l_id bigint)`.
+list, all or nothing) and `nw_delete_loan(l_id bigint)`,
+`nw_save_expenses(d jsonb)`, `nw_update_expenses(d jsonb)`, `nw_delete_expenses(d jsonb)`,
+`nw_save_trip(d jsonb)`, `nw_delete_trip(t_id bigint)`, `nw_save_rule(d jsonb)`,
+`nw_delete_rule(r_id bigint)` and `nw_apply_rule(r_id bigint)`. A few return `nw_load()` with an
+extra key or two (`added`, `skipped`, `deleted`, `changed`, `trip_id`, `rule_id`).
 Each is `SECURITY DEFINER` and starts with `nw_require_member()`, which allows a signed-in user
 only if their email is in `nw_members`. Each returns the full dataset (same shape as `nw_load`),
 which the page re-renders from. Keep that contract: any new write function must call
@@ -198,6 +244,9 @@ the "Money owed back to you" section stays hidden.
 `commitments: [{ id, date_due, label, amount, paid_from, status, paid_on, repayable, owed_id, note, created_by }]`
 (by `date_due`) and `loans: [{ id, label, principal, start_date, tenure_months, cpf_monthly, base_rate, adverse_rate, note, created_by, rates: [{ id, rate, from_date, lock_in_end }] }]`
 are added by `007_home.sql`; until then the Home tab shows only a note.
+`expenses` (by date, every column above plus `id`), `trips`, `expense_rules` (by priority) and
+`statements` (by period end) are added by `008_spending.sql`; until then the Spending tab shows
+only a note.
 
 ## Calculations (all in `compute()` in app.js; nothing derived is stored)
 - Value in SGD: amount (x price for holdings), divided by `fx` if USD.

@@ -1,6 +1,6 @@
 # Net worth tracker
 
-A small website (Overview, Activity, Home and Update tabs) for tracking household net worth month by month.
+A small website (Overview, Activity, Spending, Home and Update tabs) for tracking household net worth month by month.
 The data lives in the Supabase project "personal finance". Anyone you add can sign in with their
 email and password (or a passkey) and enter numbers; nobody else can read or change anything.
 
@@ -22,6 +22,7 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 | `supabase/004_movements.sql` | Turns on the Activity tab: buys, sells, transfers and vests. Run once (step 7) |
 | `supabase/005_owed.sql`, `006_reconcile.sql` | Money owed back, and editing movements and ledger imports (steps 8 and 9) |
 | `supabase/007_home.sql` | Turns on the Home tab: house commitments and the mortgage (step 10) |
+| `supabase/008_spending.sql` | Turns on the Spending tab: itemised card and bank spending (step 11) |
 | `.github/workflows/keep-alive.yml` | Stops the free Supabase project pausing (step 4) |
 
 ## Setup
@@ -97,6 +98,11 @@ from a Kraken ledger.
 ### 10. Turn on the Home tab
 Run `supabase/007_home.sql` the same way. It adds tables for house commitments, the mortgage and
 its rate periods, and changes nothing already stored. Running it again is harmless.
+
+### 11. Turn on the Spending tab
+Run `supabase/008_spending.sql` the same way. It adds tables for card and bank transactions,
+trips, categorising rules and imported statements, and changes nothing already stored. Personal
+rules (your own merchants) go in the database, never in this repository.
 
 ## Working on the code
 Clone the repository and open the folder in Cursor (or any editor). `AGENTS.md` explains how the
