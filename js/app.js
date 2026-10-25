@@ -143,6 +143,11 @@ const api = {
   setupHoldings(d) { return this.rpc('nw_setup_holdings', { d }); },
   saveOwed(d) { return this.rpc('nw_save_owed', { d }); },
   applyMovements(d) { return this.rpc('nw_apply_movements', { d }); },
+  saveCommitment(d) { return this.rpc('nw_save_commitment', { d }); },
+  payCommitment(id, day) { return this.rpc('nw_pay_commitment', { c_id: id, paid_on: day }); },
+  deleteCommitment(id) { return this.rpc('nw_delete_commitment', { c_id: id }); },
+  saveLoan(d) { return this.rpc('nw_save_loan', { d }); },
+  deleteLoan(id) { return this.rpc('nw_delete_loan', { l_id: id }); },
   deleteOwed(id) { return this.rpc('nw_delete_owed', { o_id: id }); },
 };
 function memberName(email) {
@@ -498,6 +503,7 @@ function renderControls() {
 
 let overviewWired = false;
 function showOverview(d) {
+  renderDueSoon(d);
   rows = compute(d);
   $('ov-empty').hidden = rows.length > 0;
   $('ov-body').hidden = rows.length === 0;
@@ -1821,9 +1827,257 @@ async function deleteOwed(ev) {
   } catch (e) { toast(saveError(e), true); renderOwed(api.data); }
 }
 
+// ---------- home: house commitments and the mortgage (supabase/007_home.sql) ----------
+const CPF_OA_RATE = 0.025; // a year, for the estimate of CPF used plus accrued interest
+const addMonths = (iso, k) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return isoDay(new Date(y, m - 1 + k, Math.min(d, new Date(y, m + k, 0).getDate())));
+};
+const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+const longDate = (iso) => `${+iso.slice(8)} ${MONTH_NAMES[+iso.slice(5, 7) - 1].slice(0, 3)} ${iso.slice(0, 4)}`;
+const annuity = (balance, r, n) => (n <= 0 ? balance : r === 0 ? balance / n : (balance * r) / (1 - Math.pow(1 + r, -n)));
+const rateOn = (rates, iso) => rates.reduce((cur, x) => (x.from_date <= iso ? x : cur), rates[0]);
+
+// One row per instalment, the first a month after drawdown. Monthly rest: interest is the balance
+// times rate/12. The instalment is set by the annuity formula over the remaining months at the
+// start and whenever the rate changes. CPF pays up to cpf_monthly of each instalment; cpfAccrued
+// estimates what has to go back to CPF: CPF used plus 2.5% a year, compounded monthly.
+function amortise(loan) {
+  const rates = [...(loan.rates || [])].sort((a, b) => a.from_date.localeCompare(b.from_date));
+  const n = Number(loan.tenure_months), cpfMonthly = Number(loan.cpf_monthly) || 0, rows = [];
+  let balance = Number(loan.principal), instalment = 0, rate = null, cpfUsed = 0, cpfAccrued = 0;
+  for (let i = 1; i <= n && rates.length; i++) {
+    const r = Number(rateOn(rates, addMonths(loan.start_date, i - 1)).rate);
+    if (r !== rate) { rate = r; instalment = annuity(balance, r / 1200, n - i + 1); }
+    const interest = balance * r / 1200, principal = instalment - interest;
+    balance -= principal;
+    const cpf = Math.min(cpfMonthly, instalment), cash = instalment - cpf;
+    cpfUsed += cpf;
+    cpfAccrued = cpfAccrued * (1 + CPF_OA_RATE / 12) + cpf;
+    const date = addMonths(loan.start_date, i);
+    rows.push({ month: date.slice(0, 7), date, rate: r, instalment, interest, principal, balance, cpf, cash, cpfUsed, cpfAccrued });
+  }
+  return rows;
+}
+
+(function checkAmortise() {
+  const rows = amortise({ principal: 1000000, start_date: '2026-01-01', tenure_months: 360, cpf_monthly: 0, rates: [{ rate: 3, from_date: '2026-01-01' }] });
+  const first = Math.round(rows[0].instalment * 100) / 100, last = rows.at(-1).balance;
+  if (rows.length !== 360 || first !== 4216.04 || Math.abs(last) >= 0.01) console.warn(`amortise() self-check failed: instalment ${first} (expected 4216.04), final balance ${last}`);
+})();
+
+// The instalment this month, or the first if it hasn't started, or the last if it has ended.
+const loanIndex = (rows, today) => { const i = rows.findIndex((r) => r.month >= today.slice(0, 7)); return i < 0 ? rows.length - 1 : i; };
+
+// A warning when the current rate period's lock-in ends within 90 days.
+function repricing(loan, today) {
+  const rates = [...(loan.rates || [])].sort((a, b) => a.from_date.localeCompare(b.from_date));
+  const cur = rates.length && rateOn(rates, today);
+  if (!cur || !cur.lock_in_end) return null;
+  const days = daysBetween(today, cur.lock_in_end);
+  return days >= 0 && days <= 90 ? { days, text: `The lock-in on ${loan.label} ends on ${longDate(cur.lock_in_end)}, ${days === 0 ? 'today' : `in ${days} ${days === 1 ? 'day' : 'days'}`}. Compare repricing offers before then.` } : null;
+}
+
+let homeWired = false, payingId = null, loanSel = null, loanRates = [];
+
+function showHome(d) {
+  const on = Array.isArray(d.commitments);
+  $('home-off').hidden = on;
+  $('home-body').hidden = !on;
+  if (!on) return;
+  if (!homeWired) {
+    homeWired = true;
+    $('com-date').value = isoDay(new Date());
+    $('com-form').addEventListener('submit', addCommitment);
+    $('com-list').addEventListener('click', commitmentClick);
+    $('loan-form').addEventListener('submit', saveLoan);
+    $('loan-addrate').onclick = () => { readRates(); const last = loanRates.at(-1); loanRates.push({ rate: '', from_date: last ? last.from_date : $('loan-start').value, lock_in_end: '' }); renderRates(); };
+    $('loan-rates').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-rm]'); if (!b) return; readRates(); loanRates.splice(+b.dataset.rm, 1); renderRates(); });
+    $('loan-pick').onchange = (ev) => { loanSel = ev.target.value; fillLoanForm(api.data); renderLoan(api.data); };
+    $('loan-delete').onclick = deleteLoan;
+  }
+  renderCommitments(d);
+  if (loanSel == null || (loanSel !== 'new' && !d.loans.some((l) => String(l.id) === loanSel))) loanSel = d.loans.length ? String(d.loans[0].id) : 'new';
+  fillLoanForm(d);
+  renderLoan(d);
+}
+
+function renderCommitments(d) {
+  const planned = d.commitments.filter((c) => c.status === 'planned');
+  const sum = (from) => planned.filter((c) => c.paid_from === from).reduce((t, c) => t + Number(c.amount), 0);
+  $('com-totals').innerHTML = `<div><dt>From cash</dt><dd>${sgd2(sum('cash'))}</dd></div><div><dt>From CPF</dt><dd>${sgd2(sum('cpf'))}</dd></div>`;
+  const list = [...d.commitments].sort((a, b) => b.date_due.localeCompare(a.date_due) || b.id - a.id);
+  $('com-none').hidden = list.length > 0;
+  $('com-list').innerHTML = list.length ? '<tr><th>Due</th><th>What</th><th>Amount</th><th>From</th><th>Status</th><th></th></tr>' + list.map((c) => {
+    const paid = c.status === 'paid';
+    const status = paid ? `Paid ${longDate(c.paid_on)}${c.owed_id ? ' <span class="muted">· owed back recorded</span>' : ''}` : 'Planned';
+    const actions = payingId === c.id
+      ? `<input type="date" data-paydate="${c.id}" value="${isoDay(new Date())}" aria-label="Date paid"> <button type="button" data-payok="${c.id}">Confirm</button> <button type="button" data-paycancel="1">Cancel</button>`
+      : `${paid ? '' : `<button type="button" data-pay="${c.id}">Mark paid</button> `}<button type="button" data-del="${c.id}">Delete</button>`;
+    return `<tr class="${paid ? 'paid' : ''}"><td>${longDate(c.date_due)}</td>
+      <td>${esc(c.label)}${c.repayable ? ' <span class="muted">· will be paid back</span>' : ''}${c.note ? `<br><span class="muted">${esc(c.note)}</span>` : ''}</td>
+      <td>${sgd2(Number(c.amount))}</td><td>${c.paid_from === 'cpf' ? 'CPF' : 'Cash'}</td><td>${status}</td><td>${actions}</td></tr>`;
+  }).join('') : '';
+}
+
+async function addCommitment(ev) {
+  ev.preventDefault();
+  const date = $('com-date').value, label = $('com-label').value.trim(), amount = parse($('com-amount').value), from = $('com-from').value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return toast('Enter the date it is due.', true);
+  if (!label) return toast('Say what the payment is for.', true);
+  if (!(amount > 0)) return toast('Enter the amount, more than zero.', true);
+  $('com-add').disabled = true;
+  try {
+    await api.saveCommitment({ date_due: date, label, amount, paid_from: from, repayable: from === 'cash' && $('com-back').checked, note: $('com-note').value.trim() });
+    for (const id of ['com-label', 'com-amount', 'com-note']) $(id).value = '';
+    $('com-back').checked = false;
+    toast('Added');
+    renderCommitments(api.data);
+  } catch (e) { toast(saveError(e), true); }
+  $('com-add').disabled = false;
+}
+
+async function commitmentClick(ev) {
+  const b = ev.target.closest('button');
+  if (!b) return;
+  if (b.dataset.pay) { payingId = +b.dataset.pay; return renderCommitments(api.data); }
+  if (b.dataset.paycancel) { payingId = null; return renderCommitments(api.data); }
+  if (b.dataset.payok) {
+    const day = $('com-list').querySelector(`[data-paydate="${b.dataset.payok}"]`).value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return toast('Enter the date it was paid.', true);
+    try { await api.payCommitment(+b.dataset.payok, day); payingId = null; toast('Marked paid'); renderCommitments(api.data); }
+    catch (e) { toast(saveError(e), true); }
+    return;
+  }
+  if (b.dataset.del) {
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+    try { await api.deleteCommitment(+b.dataset.del); toast('Deleted'); } catch (e) { toast(saveError(e), true); }
+    renderCommitments(api.data);
+  }
+}
+
+function fillLoanForm(d) {
+  const loan = d.loans.find((l) => String(l.id) === loanSel);
+  $('loan-pickrow').hidden = !d.loans.length;
+  $('loan-pick').innerHTML = d.loans.map((l) => `<option value="${l.id}">${esc(l.label)}</option>`).join('') + '<option value="new">Add another loan</option>';
+  $('loan-pick').value = loanSel;
+  const v = (x) => (x == null ? '' : plain(Number(x), 6));
+  $('loan-label').value = loan ? loan.label : '';
+  $('loan-principal').value = loan ? v(loan.principal) : '';
+  $('loan-start').value = loan ? loan.start_date : '';
+  $('loan-tenure').value = loan ? loan.tenure_months : '';
+  $('loan-cpf').value = loan ? v(loan.cpf_monthly) : '';
+  $('loan-base').value = loan ? v(loan.base_rate) : '';
+  $('loan-adverse').value = loan ? v(loan.adverse_rate) : '';
+  $('loan-note').value = loan ? loan.note : '';
+  loanRates = loan ? loan.rates.map((r) => ({ rate: plain(Number(r.rate), 6), from_date: r.from_date, lock_in_end: r.lock_in_end || '' })) : [{ rate: '', from_date: '', lock_in_end: '' }];
+  $('loan-delete').hidden = !loan;
+  delete $('loan-delete').dataset.armed;
+  $('loan-delete').textContent = 'Delete this loan';
+  if (!loan) $('loan-edit').open = true;
+  renderRates();
+}
+
+function renderRates() {
+  $('loan-rates').innerHTML = '<tr><th>Rate, % a year</th><th>From</th><th>Lock-in ends (optional)</th><th></th></tr>' + loanRates.map((r, i) => `<tr data-i="${i}">
+    <td><input inputmode="decimal" data-k="rate" value="${esc(r.rate)}" aria-label="Rate, % a year"></td>
+    <td><input type="date" data-k="from_date" value="${esc(r.from_date)}" aria-label="Rate from"></td>
+    <td><input type="date" data-k="lock_in_end" value="${esc(r.lock_in_end)}" aria-label="Lock-in ends"></td>
+    <td>${loanRates.length > 1 ? `<button type="button" data-rm="${i}" aria-label="Remove this period">×</button>` : ''}</td></tr>`).join('');
+}
+const readRates = () => { loanRates = [...$('loan-rates').querySelectorAll('tr[data-i]')].map((tr) => Object.fromEntries([...tr.querySelectorAll('input')].map((x) => [x.dataset.k, x.value.trim()]))); };
+
+async function saveLoan(ev) {
+  ev.preventDefault();
+  readRates();
+  const d = {
+    label: $('loan-label').value.trim(), principal: parse($('loan-principal').value), start_date: $('loan-start').value,
+    tenure_months: parseInt($('loan-tenure').value, 10), cpf_monthly: parse($('loan-cpf').value) || 0,
+    base_rate: parse($('loan-base').value), adverse_rate: parse($('loan-adverse').value), note: $('loan-note').value.trim(),
+    rates: loanRates.map((r) => ({ rate: parse(r.rate), from_date: r.from_date, lock_in_end: r.lock_in_end || null })),
+  };
+  if (!d.label) return toast('Give the loan a name.', true);
+  if (!(d.principal > 0)) return toast('Enter the loan amount.', true);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.start_date)) return toast('Enter the drawdown date.', true);
+  if (!(d.tenure_months > 0)) return toast('Enter the tenure in months.', true);
+  if (d.rates.some((r) => r.rate == null || !r.from_date)) return toast('Give every rate period a rate and a start date.', true);
+  if (loanSel !== 'new') d.id = +loanSel;
+  $('loan-save').disabled = true;
+  try {
+    const before = new Set(api.data.loans.map((l) => l.id));
+    await api.saveLoan(d);
+    if (loanSel === 'new') { const added = api.data.loans.find((l) => !before.has(l.id)); if (added) loanSel = String(added.id); }
+    toast('Saved');
+    fillLoanForm(api.data);
+    renderLoan(api.data);
+  } catch (e) { toast(saveError(e), true); }
+  $('loan-save').disabled = false;
+}
+
+async function deleteLoan() {
+  const b = $('loan-delete');
+  if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+  try { await api.deleteLoan(+loanSel); loanSel = null; toast('Deleted'); showHome(api.data); }
+  catch (e) { toast(saveError(e), true); }
+}
+
+function renderLoan(d) {
+  const loan = d.loans.find((l) => String(l.id) === loanSel), today = isoDay(new Date());
+  const alert = loan && repricing(loan, today);
+  $('loan-alert').hidden = !alert;
+  $('loan-alert').textContent = alert ? alert.text : '';
+  if (!loan) { $('loan-view').innerHTML = `<p class="hint">${d.loans.length ? 'Fill in the new loan below.' : 'No mortgage yet. Enter its terms below.'}</p>`; return; }
+  const rows = amortise(loan);
+  if (!rows.length) { $('loan-view').innerHTML = '<p class="hint">Add a rate period to see the schedule.</p>'; return; }
+  const i = loanIndex(rows, today), r = rows[i], started = today.slice(0, 7) >= rows[0].month;
+  const remaining = i === 0 ? Number(loan.principal) : rows[i - 1].balance, months = rows.length - i;
+  const line = (k, v, cls = '') => `<div class="${cls}"><dt>${k}</dt><dd>${v}</dd></div>`;
+  const card = [['Current rate', r.rate], ['Base rate', loan.base_rate], ['Adverse rate', loan.adverse_rate]].filter(([, x]) => x != null)
+    .map(([k, x]) => { const inst = annuity(remaining, Number(x) / 1200, months); return line(`${k}, ${plain(Number(x), 3)}%`, `${sgd2(inst)} <span class="muted">· ${sgd2(Math.max(0, inst - (Number(loan.cpf_monthly) || 0)))} cash</span>`); }).join('');
+  const years = {};
+  for (const x of rows) {
+    const y = years[x.month.slice(0, 4)] || (years[x.month.slice(0, 4)] = { n: 0, instalments: 0, interest: 0, principal: 0, cpf: 0, cash: 0, balance: 0 });
+    y.n++; y.instalments += x.instalment; y.interest += x.interest; y.principal += x.principal; y.cpf += x.cpf; y.cash += x.cash; y.balance = x.balance;
+  }
+  const end = rows.at(-1);
+  $('loan-view').innerHTML = `<div class="loancards">
+    <div class="summary"><h3>${started ? `This month, ${monthLong(r.month)}` : `First instalment, ${longDate(r.date)}`}</h3><dl class="flow">
+      ${line('Instalment', sgd2(r.instalment), 'total')}
+      ${line('Interest', sgd2(r.interest))}${line('Principal', sgd2(r.principal))}
+      ${line('From CPF', sgd2(r.cpf))}${line('From cash', sgd2(r.cash))}
+      ${line('Owed after this instalment', sgd2(Math.max(0, r.balance)))}
+      ${line('Instalments left', `${months} of ${rows.length}`)}
+      ${line('CPF used so far', sgd2(r.cpfUsed))}
+      ${line('CPF to return with interest', `${sgd2(r.cpfAccrued)} <span class="muted">estimate</span>`)}
+    </dl></div>
+    <div class="summary"><h3>Rate card</h3><p class="fine">Instalment over the remaining ${sgd2(remaining)} and ${months} months, and the cash part after CPF.</p><dl class="flow">${card}</dl>
+      <p class="fine">Total interest over the loan at the current schedule: ${sgd2(rows.reduce((t, x) => t + x.interest, 0))}. Last instalment ${monthLong(end.month)}.</p></div>
+  </div>
+  <details><summary>Schedule by year</summary><div class="scroll"><table>
+    <tr><th>Year</th><th>Instalments</th><th>Paid</th><th>Interest</th><th>Principal</th><th>CPF</th><th>Cash</th><th>Owed at year end</th></tr>
+    ${Object.entries(years).map(([y, x]) => `<tr><td>${y}</td><td>${x.n}</td><td>${money(x.instalments)}</td><td>${money(x.interest)}</td><td>${money(x.principal)}</td><td>${money(x.cpf)}</td><td>${money(x.cash)}</td><td>${money(Math.max(0, x.balance))}</td></tr>`).join('')}
+  </table></div></details>`;
+}
+
+// The Overview's "Due soon" card: planned commitments due within 90 days (and any overdue),
+// nearest first, and any mortgage repricing reminder.
+function renderDueSoon(d) {
+  const el = $('due-soon');
+  if (!Array.isArray(d.commitments)) { el.hidden = true; return; }
+  const today = isoDay(new Date());
+  const due = d.commitments.filter((c) => c.status === 'planned' && daysBetween(today, c.date_due) <= 90).sort((a, b) => a.date_due.localeCompare(b.date_due));
+  const alerts = (d.loans || []).map((l) => repricing(l, today)).filter(Boolean);
+  el.hidden = !due.length && !alerts.length;
+  if (el.hidden) return;
+  const when = (iso) => { const n = daysBetween(today, iso); return n === 0 ? 'due today' : n > 0 ? `in ${n} ${n === 1 ? 'day' : 'days'}` : `${-n} ${n === -1 ? 'day' : 'days'} overdue`; };
+  el.innerHTML = `<h2>Due soon</h2><ul>${due.map((c) => `<li><b>${esc(c.label)}</b> <span>${sgd2(Number(c.amount))} from ${c.paid_from === 'cpf' ? 'CPF' : 'cash'}</span>
+    <span class="when${daysBetween(today, c.date_due) < 0 ? ' alert' : ''}">${longDate(c.date_due)}, ${when(c.date_due)}</span></li>`).join('')}
+    ${alerts.map((a) => `<li class="alert">${esc(a.text)}</li>`).join('')}</ul>`;
+}
+
 // ---------- tabs and start-up ----------
-const TABS = { overview: showOverview, activity: showActivity, update: showUpdate };
-let stale = { overview: true, activity: true, update: true };
+const TABS = { overview: showOverview, activity: showActivity, home: showHome, update: showUpdate };
+let stale = { overview: true, activity: true, home: true, update: true };
 function showTab(name) {
   for (const t of Object.keys(TABS)) {
     $('page-' + t).hidden = t !== name;
@@ -1834,7 +2088,7 @@ function showTab(name) {
   if (api.data && stale[name]) { stale[name] = false; TABS[name](api.data); }
 }
 const currentTab = () => Object.keys(TABS).find((t) => !$('page-' + t).hidden) || 'overview';
-function paint() { stale = { overview: true, activity: true, update: true }; showTab(currentTab()); }
+function paint() { stale = { overview: true, activity: true, home: true, update: true }; showTab(currentTab()); }
 // A save on one tab changes what the others show.
 // Activity and Update redraw themselves after their own saves; the Overview never saves, so it's
 // redrawn here if it's the tab on screen.
@@ -1847,7 +2101,8 @@ const wrap = (name) => { const f = api[name].bind(api); api[name] = async (...a)
   noteFresh();
   return d;
 }; };
-['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings', 'saveOwed', 'deleteOwed', 'applyMovements'].forEach(wrap);
+['saveMonth', 'deleteMonth', 'saveItem', 'saveMovements', 'deleteMovement', 'setupHoldings', 'saveOwed', 'deleteOwed', 'applyMovements',
+  'saveCommitment', 'payCommitment', 'deleteCommitment', 'saveLoan', 'deleteLoan'].forEach(wrap);
 function noteFresh() { const m = api.data && api.data.months.at(-1); $('sync').textContent = m && m.updated_by && m.updated_by !== 'dashboard' ? 'Last saved by ' + memberName(m.updated_by) + (m.updated_at ? ', ' + clock(m.updated_at) : '') : ''; }
 
 

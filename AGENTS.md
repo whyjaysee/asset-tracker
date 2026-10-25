@@ -14,7 +14,7 @@ backed by Supabase. Read this before changing anything.
   the last release with a UMD build). They're vendored on purpose so the site loads nothing from
   other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
   `isEvalSupported: false`.
-- **Database changes go in a new numbered file** in `supabase/` (next is `007_...sql`), written
+- **Database changes go in a new numbered file** in `supabase/` (next is `008_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
   or rewritten. Change how things are shown, not the stored past. Only the owners correct past
@@ -25,15 +25,16 @@ included), after a full backup.
 ## Files
 | File | Role |
 |---|---|
-| `index.html` | Markup: header, sign-in screen, Overview, Activity and Update tabs |
+| `index.html` | Markup: header, sign-in screen, Overview, Activity, Home and Update tabs |
 | `styles.css` | All styling. Colour tokens at the top, light and dark |
 | `js/config.js` | Supabase URL and anon key; Saxo app key (empty = Saxo sync off) |
-| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); tabs; sign-in and start-up |
+| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); Home (`amortise`, `renderCommitments`, `renderLoan`, `renderDueSoon`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
 | `supabase/005_owed.sql` | Money owed back table, `nw_save_owed`, `nw_delete_owed`, and `nw_load` with owed |
 | `supabase/006_reconcile.sql` | Movement `ref`, `nw_apply_movements` (change, delete and add movements in one go), and `nw_load` with refs |
+| `supabase/007_home.sql` | Commitments, loans and rate periods; `nw_save_commitment`, `nw_pay_commitment`, `nw_delete_commitment`, `nw_save_loan`, `nw_delete_loan`; and `nw_load` with commitments and loans |
 | `docs/portfolio-analysis-prompt.md` | Prompt for a separate, read-only analysis chat. Keep its table descriptions in step with any schema change |
 | `.github/workflows/keep-alive.yml` | Pings `nw_ping()` twice a week so the free project doesn't pause |
 
@@ -56,6 +57,45 @@ included), after a full backup.
 
 - `nw_owed`: money owed back. One row per payment made that will be given back (positive `amount`,
   S$) or repayment (negative), on a cash balance item such as "House payments to be repaid".
+- `nw_commitments`: house payments due. `date_due`, `label`, `amount` (S$, positive),
+  `paid_from` cash|cpf, `status` planned|paid with `paid_on` set exactly when paid, `repayable`,
+  and `owed_id` (the `nw_owed` record made when a repayable cash payment is marked paid).
+- `nw_loans`: a mortgage. `principal` (S$), `start_date` (drawdown), `tenure_months`,
+  `cpf_monthly` (S$ from CPF each month), `base_rate` and `adverse_rate` (% a year, for the rate
+  card only), `note`.
+- `nw_loan_rates`: a loan's rate periods. `rate` (% a year) applies from `from_date` until the next
+  period starts; `lock_in_end` is optional. Unique per (`loan_id`, `from_date`); deleted with the loan.
+
+## Home: commitments and mortgage
+The Home tab (`showHome`) is hidden behind a one-line note until `007_home.sql` has been run
+(`nw_load()` then has `commitments` and `loans`). It doesn't touch net worth: `compute()`, the
+categories and the Overview chart ignore these tables, and CPF stays outside the tracker.
+
+Commitments are planned payments, newest due first, with totals still to pay from cash and from
+CPF. "Mark paid" asks for the date (today by default) and calls `nw_pay_commitment`; a repayable
+cash payment also creates a paid `nw_owed` record, on the item `nw_save_owed` would pick, so the
+money owed back line follows without entering it twice. A paid commitment keeps only its label and
+note editable; one linked to an owed record can't be deleted until that record is.
+
+`nw_save_loan` saves the loan and replaces all its rate periods in one go. It refuses a first
+period after the drawdown, periods out of order, and a lock-in that ends before its own period or
+after the next one starts. The form is built for one loan; a picker appears once there is one, so
+more can be added.
+
+`amortise(loan)` is pure and returns one row per instalment (due one month after the drawdown, then
+monthly, clamped to the month's end): `month`, `date`, `rate`, `instalment`, `interest`,
+`principal`, `balance`, `cpf`, `cash`, `cpfUsed`, `cpfAccrued`. Interest is on monthly rest. The
+instalment is the annuity over the months left (`annuity()`), worked out at the start and again
+whenever the rate changes. `cpf` is the lesser of `cpf_monthly` and the instalment; `cpfAccrued`
+adds CPF OA interest at 2.5% a year compounded monthly (`CPF_OA_RATE`), shown as an estimate.
+Nothing is rounded except for display. On load, `checkAmortise` checks S$1,000,000 at 3% over 360
+months gives 4,216.04 a month and ends within a cent of zero, and `console.warn`s if not.
+
+The mortgage section shows this month's instalment (or the first, before it starts), a rate card at
+the current, base and adverse rates over the balance and months left, total interest, and a yearly
+schedule in a collapsed `<details>`. Within 90 days of the current period's `lock_in_end`
+(`repricing()`), it shows a repricing alert. The Overview's "Due soon" card (`renderDueSoon`, hidden
+when empty) lists planned commitments due within 90 days, nearest first, plus that alert.
 
 ## Money owed back
 House payments (and anything else paid out that will be given back) go in `nw_owed`, not as
@@ -141,7 +181,10 @@ The browser never touches tables. It calls these RPC functions through supabase-
 `nw_save_movements(d jsonb)` (a list, saved all or nothing), `nw_delete_movement(m_id bigint)`,
 `nw_setup_holdings(d jsonb)` (the one-time start: creates holdings, their opening balances and
 switches off the totals they replace, all or nothing), `nw_save_owed(d jsonb)`, `nw_delete_owed(o_id bigint)`,
-`nw_apply_movements(d jsonb)` (`{ delete, update, add }`, all or nothing; adds with an existing ref are skipped).
+`nw_apply_movements(d jsonb)` (`{ delete, update, add }`, all or nothing; adds with an existing ref are skipped),
+`nw_save_commitment(d jsonb)`, `nw_pay_commitment(c_id bigint, paid_on date)` (refuses one already
+paid), `nw_delete_commitment(c_id bigint)`, `nw_save_loan(d jsonb)` (the loan plus its `rates`
+list, all or nothing) and `nw_delete_loan(l_id bigint)`.
 Each is `SECURITY DEFINER` and starts with `nw_require_member()`, which allows a signed-in user
 only if their email is in `nw_members`. Each returns the full dataset (same shape as `nw_load`),
 which the page re-renders from. Keep that contract: any new write function must call
@@ -151,6 +194,9 @@ which the page re-renders from. Keep that contract: any new write function must 
 `movements` is missing until `004_movements.sql` has been run; the Activity tab then says so.
 `owed: [{ id, date, item_id, amount, note, created_by }]` is added by `005_owed.sql`; until then
 the "Money owed back to you" section stays hidden.
+`commitments: [{ id, date_due, label, amount, paid_from, status, paid_on, repayable, owed_id, note, created_by }]`
+(by `date_due`) and `loans: [{ id, label, principal, start_date, tenure_months, cpf_monthly, base_rate, adverse_rate, note, created_by, rates: [{ id, rate, from_date, lock_in_end }] }]`
+are added by `007_home.sql`; until then the Home tab shows only a note.
 
 ## Calculations (all in `compute()` in app.js; nothing derived is stored)
 - Value in SGD: amount (x price for holdings), divided by `fx` if USD.

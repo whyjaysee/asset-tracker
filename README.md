@@ -1,6 +1,6 @@
 # Net worth tracker
 
-A two-page website (Overview and Update) for tracking household net worth month by month.
+A small website (Overview, Activity, Home and Update tabs) for tracking household net worth month by month.
 The data lives in the Supabase project "personal finance". Anyone you add can sign in with their
 email and password (or a passkey) and enter numbers; nobody else can read or change anything.
 
@@ -20,6 +20,8 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 | `supabase/002_shared_access.sql` | Sign-in access for household members. Run once (step 1) |
 | `supabase/003_lockdown.sql` | Closes the whole project to the public key. Run before the site goes live (step 1) |
 | `supabase/004_movements.sql` | Turns on the Activity tab: buys, sells, transfers and vests. Run once (step 7) |
+| `supabase/005_owed.sql`, `006_reconcile.sql` | Money owed back, and editing movements and ledger imports (steps 8 and 9) |
+| `supabase/007_home.sql` | Turns on the Home tab: house commitments and the mortgage (step 10) |
 | `.github/workflows/keep-alive.yml` | Stops the free Supabase project pausing (step 4) |
 
 ## Setup
@@ -92,6 +94,10 @@ back (such as the house payments) and their repayments.
 Run `supabase/006_reconcile.sql` the same way. It lets you change movements and save changes
 from a Kraken ledger.
 
+### 10. Turn on the Home tab
+Run `supabase/007_home.sql` the same way. It adds tables for house commitments, the mortgage and
+its rate periods, and changes nothing already stored. Running it again is harmless.
+
 ## Working on the code
 Clone the repository and open the folder in Cursor (or any editor). `AGENTS.md` explains how the
 app fits together; Cursor and Claude read it automatically.
@@ -113,6 +119,7 @@ The local copy uses the live database. Push to `main` to publish.
 - Edit on the Activity list changes a movement's date, units, amount, fee or note.
 - The Overview's holdings table shows Cost and Gain for holdings tracked on the Activity tab, by average cost.
 - Money owed back (Activity tab): add each house payment that will be given back, and each repayment. "House payments to be repaid" on the Update tab is worked out from them, so the bank balance can swing without changing net worth or spending. You can also ask the Claude chat from `docs/portfolio-analysis-prompt.md` to record them; it confirms with you first.
+- Home: list each house payment due, from cash or CPF, and choose Mark paid when it's done; one that will be given back is recorded under money owed back at the same time. Enter the mortgage and its rate periods to see this month's instalment (CPF and cash parts), what it would be at other rates, and a yearly schedule. Payments due within 90 days, and a lock-in ending within 90 days, show under "Due soon" on the Overview. None of this changes net worth.
 - The header shows who saved the latest month and when.
 
 ## Security

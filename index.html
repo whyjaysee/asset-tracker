@@ -12,7 +12,7 @@
   <span class="name">Net worth</span>
   <span class="sync" id="sync"></span>
   <span class="who" id="who" hidden><span id="whoemail"></span><button type="button" id="addpasskey" hidden>Add passkey</button><button type="button" id="signout">Sign out</button></span>
-  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-activity">Activity</button><button type="button" id="tab-update">Update</button></nav>
+  <nav id="tabs" hidden><button type="button" id="tab-overview" aria-current="page">Overview</button><button type="button" id="tab-activity">Activity</button><button type="button" id="tab-home">Home</button><button type="button" id="tab-update">Update</button></nav>
 </header>
 <section class="signin" id="signin" hidden>
   <h1>Net worth</h1>
@@ -33,6 +33,7 @@
 <div id="app" hidden>
 <main>
 <div id="page-overview">
+  <section class="duesoon" id="due-soon" hidden></section>
   <p class="empty" id="ov-empty" hidden>Nothing recorded yet. Open the Update tab to add your first month.</p>
   <div id="ov-body" hidden>
   <section class="headline">
@@ -160,6 +161,60 @@
     <p class="hint" id="owed-none">Nothing recorded yet.</p>
     <div class="scroll"><table id="owed-list"></table></div>
   </section>
+</div>
+<div id="page-home" hidden>
+  <div class="updatehead"><h1>Home</h1></div>
+  <p class="hint">Payments due on the house, from cash or CPF, and the mortgage once it starts.</p>
+  <p class="empty" id="home-off" hidden>The Home tab isn't switched on in the database yet. Run <code>supabase/007_home.sql</code> in the Supabase SQL Editor, then reload.</p>
+  <div id="home-body" hidden>
+    <section>
+      <h2 class="acttitle">Commitments</h2>
+      <div class="layout">
+        <form id="com-form" autocomplete="off" novalidate>
+          <fieldset>
+            <legend>Add a commitment</legend>
+            <div class="row"><label for="com-date">Due on</label><div class="field span2"><input type="date" id="com-date" aria-label="Due on"></div></div>
+            <div class="row"><label for="com-label">What</label><div class="field text span2"><input id="com-label" placeholder="e.g. Option to purchase" aria-label="What it's for"></div></div>
+            <div class="row"><label for="com-amount">Amount</label><div class="field span2"><span>S$</span><input inputmode="decimal" id="com-amount" aria-label="Amount"></div></div>
+            <div class="row"><label for="com-from">Paid from</label><select id="com-from" class="span2 pick"><option value="cash">Cash</option><option value="cpf">CPF</option></select></div>
+            <div class="row"><label for="com-back">Will be paid back</label><label class="span2 check"><input type="checkbox" id="com-back"> Record it as money owed back when it's paid (cash only)</label></div>
+            <div class="row"><label for="com-note">Note</label><div class="field text span2"><input id="com-note" placeholder="optional" aria-label="Note"></div></div>
+            <button class="btn primary" id="com-add" type="submit">Add</button>
+          </fieldset>
+        </form>
+        <aside class="summary">
+          <div class="muted">Still to pay</div>
+          <dl class="flow" id="com-totals"></dl>
+        </aside>
+      </div>
+      <p class="hint" id="com-none">Nothing planned yet.</p>
+      <div class="scroll"><table id="com-list"></table></div>
+    </section>
+    <section>
+      <h2 class="acttitle">Mortgage</h2>
+      <p class="hint warn" id="loan-alert" hidden></p>
+      <div id="loan-view"></div>
+      <details class="manage" id="loan-edit">
+        <summary>Loan terms</summary>
+        <form id="loan-form" autocomplete="off" novalidate>
+          <div class="row" id="loan-pickrow" hidden><label for="loan-pick">Loan</label><select id="loan-pick" class="span2 pick"></select></div>
+          <div class="row"><label for="loan-label">Name</label><div class="field text span2"><input id="loan-label" placeholder="e.g. Home loan" aria-label="Loan name"></div></div>
+          <div class="row"><label for="loan-principal">Loan amount</label><div class="field span2"><span>S$</span><input inputmode="decimal" id="loan-principal" aria-label="Loan amount"></div></div>
+          <div class="row"><label for="loan-start">Drawdown</label><div class="field span2"><input type="date" id="loan-start" aria-label="Drawdown date"></div><span class="was">first instalment a month later</span></div>
+          <div class="row"><label for="loan-tenure">Tenure</label><div class="field span2"><input inputmode="numeric" id="loan-tenure" aria-label="Tenure in months"><span>months</span></div></div>
+          <div class="row"><label for="loan-cpf">CPF each month</label><div class="field span2"><span>S$</span><input inputmode="decimal" id="loan-cpf" aria-label="CPF each month"></div></div>
+          <div class="row"><label for="loan-base">Base rate</label><div class="field span2"><input inputmode="decimal" id="loan-base" aria-label="Base rate, % a year"><span>% a year</span></div><span class="was">for the rate card</span></div>
+          <div class="row"><label for="loan-adverse">Adverse rate</label><div class="field span2"><input inputmode="decimal" id="loan-adverse" aria-label="Adverse rate, % a year"><span>% a year</span></div><span class="was">for the rate card</span></div>
+          <div class="row"><label for="loan-note">Note</label><div class="field text span2"><input id="loan-note" placeholder="optional" aria-label="Note"></div></div>
+          <h3>Rate periods</h3>
+          <p class="hint">Each rate applies from its date until the next period starts. The first must start on or before the drawdown.</p>
+          <div class="scroll"><table id="loan-rates"></table></div>
+          <p><button class="btn" id="loan-addrate" type="button">Add a period</button></p>
+          <p class="actions"><button class="btn primary" id="loan-save" type="submit">Save loan</button> <button class="btn danger" id="loan-delete" type="button" hidden>Delete this loan</button></p>
+        </form>
+      </details>
+    </section>
+  </div>
 </div>
 <div id="page-update" hidden>
   <div class="updatehead">

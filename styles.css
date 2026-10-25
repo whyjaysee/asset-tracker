@@ -209,6 +209,29 @@ details.carried .hint { margin: 10px 0 12px; }
   .coinbar, .coinparts { grid-column: 1 / -1; }
 }
 
+/* Home: commitments and mortgage */
+.field input + span { margin: 0 0 0 6px; }
+label.check { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 14px; }
+#com-list td:nth-child(2), #com-list th:nth-child(2) { text-align: left; white-space: normal; min-width: 160px; }
+#com-list button { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 0; text-decoration: underline; font-size: 13px; }
+#com-list button[data-armed] { color: var(--down); }
+#com-list input[type='date'] { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; }
+.paid { color: var(--ink-3); }
+.loancards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.loancards .summary { position: static; }
+.loancards h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 0 0 6px; }
+#loan-rates td, #loan-rates th { text-align: left; padding: 4px 8px 4px 0; border-bottom: 0; }
+#loan-rates input { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 100%; min-width: 110px; }
+#loan-rates button { border: 0; background: none; color: var(--ink-3); cursor: pointer; font-size: 18px; }
+#loan-form h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 20px 0 4px; }
+.duesoon { background: var(--surface); border: 1px solid var(--rsu); border-radius: 14px; padding: 14px 18px; margin-top: 20px; }
+.duesoon h2 { font-size: 18px; margin: 0 0 6px; }
+.duesoon ul { list-style: none; margin: 0; padding: 0; }
+.duesoon li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 5px 0; border-top: 1px solid var(--line); }
+.duesoon li:first-child { border-top: 0; }
+.duesoon .when { margin-left: auto; color: var(--ink-2); font-size: 14px; }
+.duesoon .alert { color: var(--down); }
+
 /* Citi statement import */
 .import { background: var(--surface); border: 1px solid var(--accent); border-radius: 14px; padding: 18px 20px; margin: 0 0 24px; }
 .import.error { border-color: var(--down); }
