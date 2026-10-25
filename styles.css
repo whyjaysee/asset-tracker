@@ -20,6 +20,20 @@
   --acct-3: #0b8f8a;
   --acct-4: #b8740a;
   --acct-5: #5b6b7a;
+  --sp-dining: #e0663a;
+  --sp-groceries: #3f9a4a;
+  --sp-transport: #2a78d6;
+  --sp-bills: #6a4ce0;
+  --sp-fitness: #0b8f8a;
+  --sp-health: #d9488f;
+  --sp-shopping: #b8740a;
+  --sp-fun: #e0a100;
+  --sp-household: #8a6d4f;
+  --sp-tax: #5b6b7a;
+  --sp-travel: #0094b8;
+  --sp-cashout: #9aa39f;
+  --sp-transfers: #b5bdba;
+  --sp-uncat: #c9cfcc;
   --display: Charter, 'Iowan Old Style', 'Palatino Linotype', Georgia, serif;
   --body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
 }
@@ -43,7 +57,9 @@
     --acct-2: #f06aa8;
     --acct-3: #2fc1b9;
     --acct-4: #e0a23c;
-    --acct-5: #8d9aa6; } }
+    --acct-5: #8d9aa6;
+    --sp-dining: #f07a4f; --sp-groceries: #55b562; --sp-transport: #3987e5; --sp-bills: #9d86ff; --sp-fitness: #2fc1b9; --sp-health: #f06aa8; --sp-shopping: #e0a23c;
+    --sp-fun: #f2c23a; --sp-household: #b8957a; --sp-tax: #8d9aa6; --sp-travel: #2bbbe0; --sp-cashout: #6f7875; --sp-transfers: #555d5a; --sp-uncat: #454c4a; } }
 :root[data-theme="dark"] { color-scheme: dark;
     --bg: #111514;
     --surface: #1a1a19;
@@ -64,7 +80,9 @@
     --acct-2: #f06aa8;
     --acct-3: #2fc1b9;
     --acct-4: #e0a23c;
-    --acct-5: #8d9aa6; }
+    --acct-5: #8d9aa6;
+    --sp-dining: #f07a4f; --sp-groceries: #55b562; --sp-transport: #3987e5; --sp-bills: #9d86ff; --sp-fitness: #2fc1b9; --sp-health: #f06aa8; --sp-shopping: #e0a23c;
+    --sp-fun: #f2c23a; --sp-household: #b8957a; --sp-tax: #8d9aa6; --sp-travel: #2bbbe0; --sp-cashout: #6f7875; --sp-transfers: #555d5a; --sp-uncat: #454c4a; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); font-variant-numeric: tabular-nums; }
@@ -231,6 +249,42 @@ label.check { display: flex; align-items: center; gap: 8px; color: var(--ink-2);
 .duesoon li:first-child { border-top: 0; }
 .duesoon .when { margin-left: auto; color: var(--ink-2); font-size: 14px; }
 .duesoon .alert { color: var(--down); }
+
+/* Spending */
+.spendfilters { margin: 4px 0 18px; }
+.spendfilters .chips { margin-top: 0; min-height: 0; }
+.spendfilters input[type='month'] { background: var(--field); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; margin-left: 6px; }
+.spendhead .value:empty { display: none; }
+.spendhead .sub { line-height: 1.6; }
+#spend-panel .legend .dot { display: inline-block; }
+button.link { border: 0; background: none; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; display: inline-flex; align-items: center; gap: 8px; }
+button.link:hover { text-decoration: underline; }
+#spend-cats tr.sub td:first-child { padding-left: 26px; }
+#spend-cats tr.sub td { color: var(--ink-2); font-size: 14px; }
+#spend-cats tr.total td, #spend-recurring tr.total td, #spend-travel tr.total td { font-weight: 600; }
+#spend-cats td.down { color: var(--down); } #spend-cats td.up { color: var(--up); }
+.spark { vertical-align: middle; }
+.txhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-top: 24px; }
+.txhead h3 { font: 600 15px var(--body); margin: 0; }
+.txhead .btn { margin-left: auto; }
+table.txs td.desc, table.txs th.desc, table.review td.desc, #spend-recurring .desc, #spend-statements .desc, #spend-rules .desc { text-align: left; white-space: normal; min-width: 180px; }
+table.txs td.desc .muted, table.review td.desc .muted { font-size: 12px; }
+table.txs select, table.txs input, table.review select, table.trips input, .standouts select, .standouts input { background: var(--field); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; max-width: 170px; }
+table.txs input[data-f='reimbursed'] { width: 80px; text-align: right; }
+table.txs input[data-f='note'] { width: 140px; }
+table.trips td { text-align: left; padding: 6px 8px 6px 0; }
+#spend-tripsugg h3 { font: 600 14px var(--body); color: var(--ink-2); margin: 22px 0 4px; }
+ul.standouts, ul.jumps { list-style: none; margin: 0; padding: 0; }
+ul.standouts li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+ul.standouts .amt { text-align: right; font-weight: 600; }
+ul.standouts .why { color: var(--ink-2); font-size: 14px; }
+ul.standouts .acts { text-align: right; }
+ul.standouts .acts button:not(.btn) { border: 0; background: none; color: var(--ink-3); cursor: pointer; padding: 0 0 0 10px; text-decoration: underline; font-size: 13px; }
+ul.standouts .inline { font-size: 14px; color: var(--ink-2); }
+ul.standouts .inline input { width: 90px; text-align: right; }
+ul.jumps li { padding: 8px 12px; margin-bottom: 8px; border-left: 3px solid var(--rsu); background: var(--surface); border-radius: 0 10px 10px 0; }
+#spend-statements button[data-armed], #spend-rules button[data-armed], #spend-trips button[data-armed] { color: var(--down); }
+@media (max-width: 860px) { ul.standouts li { grid-template-columns: 1fr; } ul.standouts .amt, ul.standouts .acts { text-align: left; } }
 
 /* Citi statement import */
 .import { background: var(--surface); border: 1px solid var(--accent); border-radius: 14px; padding: 18px 20px; margin: 0 0 24px; }

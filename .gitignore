@@ -1,5 +1,7 @@
 # This repository is public: bank statements and exports must never be committed.
 *.pdf
 *.csv
+*.xls
+*.xlsx
 .tmp-*
 .DS_Store

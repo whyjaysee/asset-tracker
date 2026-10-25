@@ -163,15 +163,58 @@
   </section>
 </div>
 <div id="page-spending" hidden>
-  <div class="updatehead"><h1>Spending</h1></div>
-  <p class="hint">Every card and bank payment, by category, month and trip. The Overview's spending is worked out from cash; this is the itemised view.</p>
+  <div class="updatehead">
+    <h1>Spending</h1>
+    <span class="imports"><button class="btn" id="spend-btn" type="button">Import statements</button></span>
+    <input type="file" id="spend-file" accept=".pdf,.xls,.xlsx,application/pdf,application/vnd.ms-excel" multiple hidden>
+  </div>
+  <p class="hint">Every card and bank payment, by category, month and trip. The Overview's spending is worked out from cash; this is the itemised view. Statements are read in this browser and never uploaded or kept.</p>
   <p class="empty" id="spend-off" hidden>The Spending tab isn't switched on in the database yet. Run <code>supabase/008_spending.sql</code> in the Supabase SQL Editor, then reload.</p>
   <div id="spend-body" hidden>
-    <section>
-      <h2 class="acttitle">Imported</h2>
-      <p class="hint" id="spend-summary"></p>
-      <div class="scroll"><table id="spend-statements" hidden></table></div>
+    <section class="import" id="spend-import" aria-live="polite" hidden></section>
+    <div class="controls spendfilters" id="spend-filters"></div>
+    <div class="classes spendhead" id="spend-head"></div>
+    <section class="panel" id="spend-panel">
+      <p class="charttitle" id="spend-charttitle"></p>
+      <p class="chartnote" id="spend-chartnote"></p>
+      <div class="chips" id="spend-legend"></div>
+      <div class="chartbox"><canvas id="spend-chart" role="img"></canvas></div>
     </section>
+    <section>
+      <h2 class="acttitle">By category</h2>
+      <p class="hint">Click a category to see its subcategories, and a subcategory to see and change its transactions. Averages divide by the months your statements cover.</p>
+      <div class="scroll"><table id="spend-cats"></table></div>
+      <div id="spend-txs"></div>
+    </section>
+    <section>
+      <h2 class="acttitle">Standouts</h2>
+      <div id="spend-standouts"></div>
+    </section>
+    <section>
+      <h2 class="acttitle">Recurring charges</h2>
+      <p class="hint">Charged in at least 3 of the last 4 months at a similar amount: subscriptions, memberships and bills.</p>
+      <div class="scroll"><table id="spend-recurring"></table></div>
+    </section>
+    <section>
+      <h2 class="acttitle">Travel by trip</h2>
+      <div class="scroll"><table id="spend-travel"></table></div>
+      <div id="spend-tripsugg"></div>
+      <details id="spend-trips-edit"><summary>Edit trips</summary><div id="spend-trips"></div></details>
+    </section>
+    <section>
+      <h2 class="acttitle">To review</h2>
+      <div id="spend-review"></div>
+    </section>
+    <details>
+      <summary>Imported statements</summary>
+      <p class="hint" id="spend-summary"></p>
+      <div class="scroll"><table id="spend-statements"></table></div>
+    </details>
+    <details>
+      <summary>Your rules</summary>
+      <p class="hint">Rules you've added, tried before the built-in ones, lowest priority first. Add one from To review with "Apply to all from this merchant".</p>
+      <div class="scroll"><table id="spend-rules"></table></div>
+    </details>
   </div>
 </div>
 <div id="page-home" hidden>

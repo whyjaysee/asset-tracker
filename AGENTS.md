@@ -13,7 +13,10 @@ backed by Supabase. Read this before changing anything.
   or `js/pdf.min.js` and `js/pdf.worker.min.js` (pdfjs-dist 3.11.174 legacy UMD build and worker,
   the last release with a UMD build). They're vendored on purpose so the site loads nothing from
   other hosts. pdf.js 3.x is affected by CVE-2024-4367, so every `getDocument` call must pass
-  `isEvalSupported: false`.
+  `isEvalSupported: false`. Nor `js/xlsx.full.min.js` (SheetJS Community Edition 0.20.3, from
+  cdn.sheetjs.com; sha256 `cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41`),
+  loaded only when a UOB `.xls` is picked. It's the full build because the mini and core builds
+  can't read old binary `.xls` files.
 - **Database changes go in a new numbered file** in `supabase/` (next is `009_...sql`), written
   to be safe to run twice, and are run by hand in the Supabase SQL Editor. Never edit an old one.
 - **History is frozen.** Jul-20 to Aug-26 came from a Google Sheet and is not to be cleaned up
@@ -28,7 +31,7 @@ included), after a full backup.
 | `index.html` | Markup: header, sign-in screen, Overview, Activity, Spending, Home and Update tabs |
 | `styles.css` | All styling. Colour tokens at the top, light and dark |
 | `js/config.js` | Supabase URL and anon key; Saxo app key (empty = Saxo sync off) |
-| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); Home (`amortise`, `renderCommitments`, `renderLoan`, `renderDueSoon`, ...); Spending (`showSpending`, ...); tabs; sign-in and start-up |
+| `js/app.js` | All logic, in this order: helpers, `compute()` and `unitsAt()`; Supabase data layer (`api`); Overview (`renderHeadline`, `buildChart`, ...); Update (`startDraft`, `applyTracked`, `renderForm`, `save`, ...); Citi statement import (`pdfLines`, `readCiti`, `importCiti`, ...); Saxo sync (`startSaxo`, `finishSaxo`, `fillSaxo`, ...); Activity (`renderActivity`, `addMovement`, ...); Home (`amortise`, `renderCommitments`, `renderLoan`, `renderDueSoon`, ...); Spending (`categorise`, `readCitiCard`, `readUob`, `bankParts`, `importSpending`, `spendView`, `showSpending`, ...); tabs; sign-in and start-up |
 | `supabase/002_shared_access.sql` | Members table and the `nw_*` functions the site calls |
 | `supabase/003_lockdown.sql` | Closes every table to the public and signed-in roles |
 | `supabase/004_movements.sql` | Movements table, `nw_save_movements`, `nw_delete_movement`, `nw_setup_holdings`, and `nw_load` with movements |
@@ -116,10 +119,47 @@ when empty) lists planned commitments due within 90 days, nearest first, plus th
 The Spending tab (`showSpending`) is the itemised view of card and bank outflows, beside the
 inferred spending in `compute()`, which stays as it is. It's hidden behind a one-line note until
 `008_spending.sql` has been run (`nw_load()` then has `expenses`, `trips`, `expense_rules` and
-`statements`). Built in phases: the tables and functions are in; statement importers (Citi card
-PDF, UOB card `.xls`, Citibank account outflows), categorisation and the analysis views come next.
-Every total, average, standout and trip table is worked out in the browser; nothing derived is
-stored.
+`statements`). Every total, average, standout and trip table is worked out in the browser from
+pure functions (`spendMonthly`, `rolling12`, `coverage`, `standouts`, `recurringCharges`,
+`tripTable`, `suggestTrips`); nothing derived is stored. `checkSpending()` runs them, and the
+parsers, on made-up data on load and `console.warn`s on a wrong result.
+
+**Importing.** "Import statements" takes several files at once, tells each type from its content,
+and shows a preview (period, card, lines, purchases, credits, bill payments left out, duplicates,
+the check) before anything is saved:
+- Citi card PDF (`readCitiCard`): lines come from `cardLines`, which joins pdf.js's per-character
+  items and splits a line into cells where the gap is wider than about two spaces (date,
+  merchant, city, country, amount, margin noise). One file may hold several cards ("TRANSACTIONS
+  FOR ..."). The statement date is the "Statement Date" line, or the due date minus 25 days moved
+  to the day other statements close on (`statementDateFromDue`); a card with nothing due has
+  neither and borrows the date of another file of the same statement (same page count) that its
+  lines and payments fit, or asks. Lines get the statement's year, or the year before when their
+  month is later. Payments are left out; `FOREIGN AMOUNT` lines give the foreign leg.
+  `reconcileCard` checks purchases, refunds and fees against the summary (Citi nets fee reversals
+  into fees, so that column comes from the balance); a mismatch warns but can still be saved.
+- UOB `.xls` (`readUob`, SheetJS): the account number row is never read; descriptions keep their
+  first line only (no Ref No) and split on runs of spaces into merchant, city and country.
+  "PAYMT THRU E-BANK" bill payments are left out.
+- Citibank account PDF (`bankParts`, from `readCiti`): S$ withdrawals become rows except card bill
+  payments; a deposit is kept only as a refund from a payee paid before. The payee is the
+  merchant (`bankMerchant`).
+- Refs are `source:date:amount:merchant:n`, `n` counting identical lines across the whole file. A
+  line is also treated as already imported when the same card has a stored line on that date for
+  that amount (each matching once), and takes its ref, since older lines may have other merchant
+  keys; a merchant already stored keeps its key (matched on the description's letters).
+
+**Categorising** (`categorise`): the user's rules by priority, then the built-in `SPEND_RULES`
+(generic names only), then travel (a country other than SG or a foreign leg, except bills and
+online merchants abroad), then a guess: Dining by amount for a local card line, Uncategorised for
+S$300 or more, refunds and bank payees. Transfers and Investments are always kind excluded.
+
+**The tab**: filters (period, kinds, cards), a headline (latest complete month, usual month,
+travel, against the spending worked out from cash, coverage per card), a stacked chart by category
+with the 12-month average (paler bars for months not every started card covers), the category
+table (expand for subcategories, click for editable transactions), standouts with quick labels
+("not a standout" is kept in the note), recurring charges, travel by trip with suggested trips,
+and To review (merchants guessed or uncategorised; "Apply to all" saves an anchored rule and runs
+`nw_apply_rule`). Its count is in the tab label.
 
 - **Never store or show a card or account number, or a `Ref No`.** The importers drop them and
   statement text goes through `scrub()`. As a backstop, the description, merchant, card and note

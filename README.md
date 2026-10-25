@@ -16,6 +16,7 @@ This repository is public on purpose (free GitHub Pages). It contains only the w
 | `js/config.js` | Your Supabase address and public key (safe to publish; see Security) |
 | `js/chart.umd.js`, `js/supabase.js` | Chart.js 4.4.7 and supabase-js 2.118.0, bundled so nothing loads from elsewhere |
 | `js/pdf.min.js`, `js/pdf.worker.min.js` | pdf.js 3.11.174, bundled, for reading Citi statements in the browser |
+| `js/xlsx.full.min.js` | SheetJS 0.20.3, bundled, for reading UOB card exports (.xls) in the browser |
 | `supabase/001_setup.sql` | Not in this repository: it holds the imported history. Already run; keep your copy private |
 | `supabase/002_shared_access.sql` | Sign-in access for household members. Run once (step 1) |
 | `supabase/003_lockdown.sql` | Closes the whole project to the public key. Run before the site goes live (step 1) |
@@ -125,6 +126,7 @@ The local copy uses the live database. Push to `main` to publish.
 - Edit on the Activity list changes a movement's date, units, amount, fee or note.
 - The Overview's holdings table shows Cost and Gain for holdings tracked on the Activity tab, by average cost.
 - Money owed back (Activity tab): add each house payment that will be given back, and each repayment. "House payments to be repaid" on the Update tab is worked out from them, so the bank balance can swing without changing net worth or spending. You can also ask the Claude chat from `docs/portfolio-analysis-prompt.md` to record them; it confirms with you first.
+- Spending: choose Import statements and pick any mix of Citi card statement PDFs, Citibank account statement PDFs and UOB card exports (.xls). They're read in your browser and never uploaded; card and account numbers are left out. Check the preview, then save; importing the same file again adds nothing. Each line is put in a category by your rules, then built-in ones; work through To review once, choosing "Apply to all from this merchant", and later imports follow. Click a category for its subcategories and lines, which you can change; mark standouts as a trip, a one-off or paid back; accept suggested trips.
 - Home: list each house payment due, from cash or CPF, and choose Mark paid when it's done; one that will be given back is recorded under money owed back at the same time. Enter the mortgage and its rate periods to see this month's instalment (CPF and cash parts), what it would be at other rates, and a yearly schedule. Payments due within 90 days, and a lock-in ending within 90 days, show under "Due soon" on the Overview. None of this changes net worth.
 - The header shows who saved the latest month and when.
 

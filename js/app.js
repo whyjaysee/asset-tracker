@@ -772,20 +772,22 @@ function textLines(items) {
 }
 
 // pdf.js is configured with isEvalSupported off: pdf.js 3.x is affected by CVE-2024-4367 otherwise.
-async function pdfLines(bytes) {
+// Each page's text items: string, position, width and height.
+async function pdfPages(bytes) {
   const lib = await loadPdfJs();
   const doc = await lib.getDocument({ data: bytes, isEvalSupported: false, disableFontFace: true }).promise;
-  const lines = [];
+  const pages = [];
   try {
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const { items } = await page.getTextContent();
-      lines.push(...textLines(items.filter((i) => i.str && i.str.trim()).map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width }))));
+      pages.push(items.filter((i) => i.str && i.str.trim()).map((i) => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width, h: Math.abs(i.transform[3]) || i.height })));
       page.cleanup();
     }
   } finally { doc.destroy(); }
-  return lines;
+  return pages;
 }
+async function pdfLines(bytes) { return (await pdfPages(bytes)).flatMap(textLines); }
 
 const lineWithout = (l) => l.amounts.reduceRight((s, a) => s.slice(0, a.i) + ' ' + s.slice(a.end), l.raw).replace(/\s+/g, ' ').trim();
 const wordRight = (l, re) => { const m = re.exec(l.raw); return m ? l.right[m.index + m[0].length - 1] : null; };
@@ -2084,22 +2086,1182 @@ function renderDueSoon(d) {
 }
 
 // ---------- spending: itemised card and bank outflows ----------
-// Rows, trips, rules and statements come from 008_spending.sql; every total is worked out here.
+// Rows, trips, rules and statements come from 008_spending.sql. Statements are read in this
+// browser and never uploaded or kept: card and account numbers are dropped, Ref No values are cut
+// off and statement text goes through scrub(). Every total, average and standout is worked out
+// here from nw_load(); nothing derived is stored.
 const SPEND_SOURCES = { citi_card: 'Citi cards', uob_card: 'UOB cards', citi_bank: 'Citibank account', manual: 'Added by hand' };
+const SPEND_KINDS = [['recurring', 'Recurring'], ['travel', 'Travel'], ['one_off', 'One-off'], ['reimbursed', 'Paid back'], ['excluded', 'Excluded']];
+const kindName = (k) => (SPEND_KINDS.find(([id]) => id === k) || [k, k])[1];
+const SPEND_CATS = [
+  ['Dining', 'dining', ['Coffee, bakery and snacks', 'Everyday meals (S$25 or less)', 'Casual restaurants (S$25–80)', 'Dinners and group meals (over S$80)']],
+  ['Groceries', 'groceries', []],
+  ['Transport', 'transport', ['Public transport', 'Ride-hailing', 'Driving']],
+  ['Bills', 'bills', ['Utilities', 'Internet and mobile', 'Work and AI software', 'Streaming and app subscriptions', 'Insurance', 'Card fees', 'Fines']],
+  ['Fitness', 'fitness', ['Gym and classes', 'Sports kit']],
+  ['Health', 'health', ['Dental', 'Physio and TCM', 'Pharmacy', 'Eyewear']],
+  ['Shopping', 'shopping', ['Clothes', 'Electronics', 'Home', 'Online', 'Gifts']],
+  ['Entertainment', 'fun', ['Concerts and events', 'Movies and attractions']],
+  ['Household', 'household', ['Helper', 'Family home', 'Transfers to family']],
+  ['Tax', 'tax', ['Income tax', 'Property tax']],
+  ['Travel', 'travel', ['Flights', 'Hotels and stays', 'Food and drink', 'Shopping', 'Activities', 'Local transport', 'Visas and fees']],
+  ['Cash withdrawals', 'cashout', []],
+  ['Transfers', 'transfers', ['Card payments', 'Own accounts', 'Investments']],
+  ['Uncategorised', 'uncat', []],
+];
+const CAT_NAMES = SPEND_CATS.map((c) => c[0]);
+// The categories to offer: the built-in ones, then any others in the data or the user's rules.
+const allCats = (d) => [...CAT_NAMES, ...new Set([...d.expenses.map((r) => r.category), ...d.expense_rules.map((r) => r.category)].filter((c) => c && !CAT_NAMES.includes(c)))];
+// Moving money between your own accounts or into investments is never spending.
+const NOT_SPENDING = /^(Transfers|Investments)$/;
+const catVar = (c) => '--sp-' + (SPEND_CATS.find((x) => x[0] === c) || SPEND_CATS.at(-1))[1];
+const subsOf = (c) => (SPEND_CATS.find((x) => x[0] === c) || [0, 0, []])[2];
+const TRAVEL_SUBS = subsOf('Travel');
+// Dining that no rule matches is guessed from the amount: up to S$25, up to S$80, then more.
+const DINING_BANDS = [[25, 'Everyday meals (S$25 or less)'], [80, 'Casual restaurants (S$25–80)'], [Infinity, 'Dinners and group meals (over S$80)']];
+const BIG_ONE = 300, FIRST_TIME = 150;
+// What a purchase abroad counts as within travel, by the category it would have at home.
+const TRAVEL_SUB = { Dining: 'Food and drink', Groceries: 'Food and drink', Transport: 'Local transport', Shopping: 'Shopping', Entertainment: 'Activities', Fitness: 'Activities', Health: 'Shopping' };
+
+// Built-in rules: generic names only (chains, airlines, apps, government bodies). Personal rules
+// live in nw_expense_rules and run first. Tested on the merchant key and the description.
+const rule = (re, cat, sub = '', o = {}) => ({ re, cat, sub, ...o });
+const SPEND_RULES = [
+  rule(/\bSP DIGITAL\b|\bSP SERVICES\b/, 'Bills', 'Utilities'),
+  rule(/\bSINGTEL\b|\bSTARHUB\b|\bM1 |\bCIRCLES\b|\bMYREPUBLIC\b|\bSIMBA\b|\bGOMO\b/, 'Bills', 'Internet and mobile'),
+  rule(/OPENAI|ANTHROPIC|CLAUDE|CURSOR|GITHUB|LINKEDIN|NOTION|FIGMA/, 'Bills', 'Work and AI software'),
+  rule(/NETFLIX|SPOTIFY|DISNEY\+|YOUTUBE|APPLE\.COM\/BILL|KINDLE|AUDIBLE|PLAYSTATION/, 'Bills', 'Streaming and app subscriptions'),
+  rule(/ANNUAL MEMBER|MEMBERSHIP FEE|CCY CONVERSION FEE|LATE CHARGE|FINANCE CHARGE|INTEREST CHARGE|CASH REBATE/, 'Bills', 'Card fees'),
+  rule(/TRAFFIC POLICE|LTA FINE|\bURA\b/, 'Bills', 'Fines'),
+  rule(/INSURANCE|\bETIQA\b|\bAIA\b|PRUDENTIAL|GREAT EASTERN|SINGLIFE/, 'Bills', 'Insurance'),
+  rule(/\bSAXO\b|\bKRAKEN\b|\bBINANCE\b|COINBASE|\bGEMINI\b|CRYPTO\.COM|TIGER BROKERS|\bMOOMOO\b|\bFUTU\b|\bIBKR\b|INTERACTIVE BROKERS|\bENDOWUS\b|\bSYFE\b|STASHAWAY|\bWEBULL\b/, 'Transfers', 'Investments', { kind: 'excluded' }),
+  rule(/TIME DEPOSIT|FIXED DEPOSIT/, 'Transfers', 'Own accounts', { kind: 'excluded' }),
+  rule(/ATM WITHDRAWAL|CASH WITHDRAWAL/, 'Cash withdrawals'),
+  rule(/BUS\/MRT|SIMPLYGO|EZ-LINK/, 'Transport', 'Public transport'),
+  rule(/\bGRAB\b|\bTADA\b|\bGOJEK\b|\bGOPAY\b|\bCDG\b|COMFORTDELGRO|\bZIG\b|\bRYDE\b|\bUBER\b|\bBOLT\b/, 'Transport', 'Ride-hailing'),
+  rule(/\bSHELL\b|\bESSO\b|\bCALTEX\b|\bSPC\b|SINOPEC|PARKING|CARPARK|\bGETGO\b|\bBLUESG\b/, 'Transport', 'Driving'),
+  rule(/SINGAPORE ?AIR|SINGAPOR\d|\bSCOOT\b|AIRASIA|JETSTAR|ZIPAIR|CATHAY PACIFIC|AIR CHINA|LUFTHANSA|NORWEGIAN|\bKLM\b|QATAR|EMIRATES|TURKISH|\bJAL\b|\bANA\b/, 'Travel', 'Flights'),
+  rule(/TRAVELOKA|TRIP\.COM|EXPEDIA|JETTZY|AGODA|BOOKING\.COM|AIRBNB|PRICELN|HOTEL|RESORT|HOSTEL|NOVOTEL|\bIBIS\b|MARRIOTT|HILTON|HYATT|ACCOR/, 'Travel', 'Hotels and stays', { air: true }),
+  rule(/VISA FEE|\bETA\b|\bESTA\b/, 'Travel', 'Visas and fees'),
+  rule(/FAIRPRICE|\bNTUC\b|FP XTRA|COLD STORAGE|CS FRESH|\bFINEST\b|SHENG SIONG|\bGIANT\b|DON DON DONKI|\bJASONS\b|MARKET PLACE|7-ELEVEN|REDMART/, 'Groceries'),
+  rule(/STARBUCKS|TOAST BOX|YA KUN|BREADTALK|BENGAWAN SOLO|FLASH COFFEE|LUCKIN|COFFEE|\bCAFE\b|ROASTERY|BAKERY|\bKOPI\b|CHICHA|\bLIHO\b|GONG CHA|IJOOZ/, 'Dining', 'Coffee, bakery and snacks'),
+  rule(/VIRGIN ACTIVE|ANYTIME FITNESS|FITNESS FIRST|PURE FITNESS|\bCLIMB|BOULDER|\bGYM\b|CLASSPASS|\bYOGA\b|PILATES|ACTIVESG/, 'Fitness', 'Gym and classes'),
+  rule(/DECATHLON|\bNIKE\b|ADIDAS|LULULEMON|UNDER ARMOUR|\bASICS\b/, 'Fitness', 'Sports kit'),
+  rule(/GUARDIAN|WATSONS|\bUNITY\b/, 'Health', 'Pharmacy'),
+  rule(/DENTAL/, 'Health', 'Dental'),
+  rule(/PHYSIO|\bTCM\b/, 'Health', 'Physio and TCM'),
+  rule(/OWNDAYS|OPTICAL|SPECTACLE/, 'Health', 'Eyewear'),
+  rule(/SISTIC|TICKETMASTER|KLOOK/, 'Entertainment', 'Concerts and events'),
+  rule(/\bGV\b|GOLDEN VILLAGE|\bSHAW\b|CATHAY CINEPLEX|MANDAI/, 'Entertainment', 'Movies and attractions'),
+  rule(/SHOPEE|LAZADA|AMAZON|TAOBAO/, 'Shopping', 'Online', { online: true }),
+  rule(/UNIQLO|\bZARA\b|H&M|\bCOS\b/, 'Shopping', 'Clothes'),
+  rule(/CHALLENGER|BEST DENKI|HARVEY NORMAN|APPLE\.COM\/SG|APPLE STORE/, 'Shopping', 'Electronics'),
+  rule(/\bIKEA\b|\bCOURTS\b/, 'Shopping', 'Home'),
+  rule(/INLAND REVENUE|\bIRAS\b/, 'Tax', 'Income tax'),
+  rule(/\bAXS\b/, 'Tax', 'Property tax'),
+  rule(/\bMCST\b/, 'Household', 'Family home'),
+];
+
+const ISO2 = new Set(('AD AE AF AG AI AL AM AO AR AT AU AW AZ BA BB BD BE BF BG BH BI BJ BM BN BO BR BS BT BW BY BZ CA CD CF CG CH CI CK CL CM CN CO CR CU CV CY CZ ' +
+  'DE DJ DK DM DO DZ EC EE EG ER ES ET FI FJ FM FO FR GA GB GD GE GH GI GL GM GN GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IM IN IQ IR IS IT JE JM JO JP KE KG KH KI KM KN ' +
+  'KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MG MH MK ML MM MN MO MR MT MU MV MW MX MY MZ NA NC NE NG NI NL NO NP NR NZ OM PA PE PF PG PH PK PL PR PS PT ' +
+  'PW PY QA RO RS RU RW SA SB SC SD SE SG SI SK SL SM SN SO SR SS ST SV SY SZ TC TD TG TH TJ TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VN VU WS YE ZA ZM ZW').split(' '));
+const ISO3 = { SGP: 'SG', MYS: 'MY', IDN: 'ID', THA: 'TH', JPN: 'JP', KOR: 'KR', CHN: 'CN', HKG: 'HK', TWN: 'TW', VNM: 'VN', PHL: 'PH', AUS: 'AU', NZL: 'NZ', USA: 'US',
+  GBR: 'GB', IRL: 'IE', FRA: 'FR', DEU: 'DE', ITA: 'IT', ESP: 'ES', NLD: 'NL', CHE: 'CH', CAN: 'CA', IND: 'IN', ARE: 'AE', NOR: 'NO', SWE: 'SE', DNK: 'DK', LUX: 'LU', PRT: 'PT', TUR: 'TR' };
+// Currency names on Citi's FOREIGN AMOUNT lines, and the country a currency points to.
+const FX_NAMES = [[/RUPIAH/, 'IDR'], [/U\.?\s?S\.? DOLLAR/, 'USD'], [/RINGGIT/, 'MYR'], [/YEN/, 'JPY'], [/EURO/, 'EUR'], [/STERLING|POUND/, 'GBP'], [/AUSTRALIAN/, 'AUD'],
+  [/HONG KONG/, 'HKD'], [/BAHT/, 'THB'], [/WON/, 'KRW'], [/TAIWAN/, 'TWD'], [/YUAN|RENMINBI/, 'CNY'], [/SWISS/, 'CHF'], [/NORWEGIAN/, 'NOK'], [/SWEDISH/, 'SEK'], [/DANISH/, 'DKK'],
+  [/CANADIAN/, 'CAD'], [/NEW ZEALAND/, 'NZD'], [/PESO/, 'PHP'], [/DONG/, 'VND'], [/INDIAN RUPEE/, 'INR'], [/DIRHAM/, 'AED']];
+const FX_COUNTRY = { IDR: 'ID', MYR: 'MY', JPY: 'JP', THB: 'TH', KRW: 'KR', TWD: 'TW', CNY: 'CN', HKD: 'HK', AUD: 'AU', NZD: 'NZ', GBP: 'GB', CHF: 'CH', NOK: 'NO', SEK: 'SE',
+  DKK: 'DK', CAD: 'CA', PHP: 'PH', VND: 'VN', INR: 'IN', AED: 'AE', USD: 'US' };
+
+const addDays = (iso, k) => new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10) + k)).toISOString().slice(0, 10);
+const shiftMonth = (m, k) => { const t = +m.slice(0, 4) * 12 + +m.slice(5) - 1 + k; return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}`; };
+const median = (v) => { if (!v.length) return null; const s = [...v].sort((a, b) => a - b), h = s.length >> 1; return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2; };
+const quantile = (v, q) => { const s = [...v].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+const titleCase = (s) => String(s).toLowerCase().split(/\s+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+const regionName = (c) => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(c) || c; } catch { return c; } };
+const netOf = (r) => Number(r.amount) - Number(r.reimbursed || 0);
+const isAbroad = (r) => (!!r.country && r.country !== 'SG') || (!!r.fx_currency && r.fx_currency !== 'SGD');
+const ruleRe = (p) => { try { return new RegExp(p, 'i'); } catch { return null; } };
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The merchant key: upper case, without Ref No, booking codes after "*" (a word after "* ", or one
+// with digits), runs of 4 or more digits and scrubbed references, spaces collapsed. Rules, recurring
+// charges and first visits use it.
+function merchantKey(s) {
+  return String(s || '').split('\n')[0].toUpperCase()
+    .replace(/REF NO.*$/, '')
+    .replace(/\*\s+\S+/g, ' ').replace(/\*[A-Z0-9-]*\d[A-Z0-9-]*/g, ' ').replace(/\*/g, ' ')
+    .replace(/\d{4,}/g, ' ').replace(/…/g, ' ')
+    .replace(/^[\s\-/.,@_]+|[\s\-/.,@_]+$/g, '')
+    .replace(/\s+/g, ' ').trim();
+}
+// Descriptions compared by their letters only, to reuse the key a merchant already has.
+const descLetters = (s) => String(s || '').toUpperCase().replace(/[^A-Z]/g, '');
+
+// A Citibank account line's payee: the transfer type, references, phone and UEN codes, purpose
+// codes and bank names are dropped, leaving the name.
+function bankMerchant(desc) {
+  const s = String(desc || '').toUpperCase();
+  if (/^ATM WITHDRAWAL/.test(s)) return 'ATM WITHDRAWAL';
+  const rest = s
+    .replace(/^(?:PAYNOW|FAST|GIRO|MEPS)?\s*(?:EXTERNAL|INCOMING|OUTGOING)?\s*TRANSFER\b/, ' ')
+    .replace(/^INTERNAL TRANSFER (?:DR|CR)\b/, ' ').replace(/^INCOMING GIRO FROM\b/, ' ')
+    .replace(/\S*…\S*/g, ' ').replace(/\b[A-Z]{3,6}\d{4,}[A-Z0-9]*\b/g, ' ').replace(/_?\d{4,}/g, ' ')
+    .replace(/\bMSISDN\s*\S*/g, ' ').replace(/\bUEN\s+\S+/g, ' ').replace(/\b[A-Z]{4,6}-[A-Z]+\b/g, ' ')
+    .replace(/\b(?:DBS BANK LTD|UOB UNITED OVERSEAS BANK LTD|UNITED OVERSEAS BANK LTD|OCBC OVERSEA-CHINESE BANKING CORPN|MARIBANK SINGAPORE PTE LTD|STANDARD CHARTERED BANK SINGAPORE LTD|BANK OF AMERICA, NA|FR CITIBANK)\b/g, ' ');
+  return merchantKey(rest.split(/\s+/).filter(Boolean).slice(0, 5).join(' ')) || 'TRANSFER';
+}
+
+// The country at the end of a statement line, from the cells after the merchant: its own 2-letter
+// code, a 3-letter one (UOB's "SGP"), or two capitals glued to the city ("SAN FRANCISCOUS").
+function splitCountry(rest) {
+  if (!rest.length) return { country: null };
+  const last = rest.at(-1).trim(), tok = last.split(/\s+/).at(-1).toUpperCase();
+  if (/^[A-Z]{2}$/.test(tok) && ISO2.has(tok)) return { country: tok };
+  if (/^[A-Z]{3}$/.test(tok) && ISO3[tok]) return { country: ISO3[tok] };
+  const glued = last.length > 3 && /[A-Za-z]([A-Z]{2})$/.exec(last);
+  return { country: glued && ISO2.has(glued[1]) ? glued[1] : null };
+}
+
+// Category, subcategory, kind and who labelled it, for a new row. The user's rules come first
+// (a rule without a kind keeps the detected one), then the built-in rules, then travel detection,
+// then a guess: Dining by amount for a local card purchase, otherwise Uncategorised.
+function categorise(row, rules = []) {
+  const found = detectCategory(row);
+  for (const r of rules) {
+    const re = ruleRe(r.pattern);
+    if (re && (re.test(row.merchant || '') || re.test(row.description || ''))) {
+      return { category: r.category, subcategory: r.subcategory || '', kind: r.kind || (r.category === 'Travel' ? 'travel' : found.kind), labelled_by: 'rule' };
+    }
+  }
+  return found;
+}
+function detectCategory(row) {
+  const out = (category, subcategory = '', kind = 'recurring', labelled_by = 'rule') => ({ category, subcategory, kind, labelled_by });
+  const hay = `${row.merchant || ''} ${String(row.description || '').toUpperCase()}`, abroad = isAbroad(row);
+  for (const b of SPEND_RULES) {
+    if (!b.re.test(hay)) continue;
+    if (b.cat === 'Travel') return out('Travel', b.air && /\bAIR|FLIGHT/.test(hay) ? 'Flights' : b.sub, 'travel');
+    if (abroad && TRAVEL_SUB[b.cat] && !b.online) return out('Travel', TRAVEL_SUB[b.cat], 'travel');
+    return out(b.cat, b.sub, b.kind);
+  }
+  if (abroad) {
+    const online = /\.COM\b|\.IO\b|\.AI\b|WWW\.|ONLINE|PAYPAL|GOOGLE|MICROSOFT|ADOBE|SUBSCR|\*/.test(row.merchant || '') && ['US', 'IE', 'GB', 'NL', 'LU', 'CA'].includes(row.country);
+    return online ? out('Shopping', 'Online', 'recurring', 'guess') : out('Travel', 'Food and drink', 'travel');
+  }
+  if (row.amount < 0 || row.source === 'citi_bank' || row.amount >= BIG_ONE) return out('Uncategorised', '', 'recurring', 'guess');
+  return out('Dining', DINING_BANDS.find(([max]) => row.amount <= max)[1], 'recurring', 'guess');
+}
+
+// Refs: source, date, amount, merchant key and a count of identical rows in the same file, so two
+// identical rides on one day are two rows and importing a file again adds nothing.
+function withRefs(rows) {
+  const n = {};
+  return rows.map((r) => {
+    const key = `${r.source}:${r.date}:${r.amount.toFixed(2)}:${r.merchant}`;
+    n[key] = (n[key] || 0) + 1;
+    return { ...r, ref: `${key}:${n[key]}` };
+  });
+}
+
+// ----- Citi credit card statement (PDF) -----
+// Card statements set each character on its own. Characters closer than a fifth of the text height
+// join, a wider gap is a space, and a gap wider than about two spaces starts a new cell, so the
+// merchant, city, country, amount and anything in the margin come out as cells of their own.
+function cardLines(items) {
+  const rows = [];
+  for (const it of [...items].sort((a, b) => b.y - a.y || a.x - b.x)) {
+    const row = rows.at(-1);
+    if (row && Math.abs(row.y - it.y) <= 2.5) row.items.push(it); else rows.push({ y: it.y, items: [it] });
+  }
+  return rows.map((row) => {
+    const cells = [];
+    let cur = '', prev = null;
+    for (const it of row.items.sort((a, b) => a.x - b.x)) {
+      const gap = prev ? it.x - (prev.x + prev.w) : 0, h = it.h || 8;
+      if (prev && gap > 0.45 * h) { if (cur.trim()) cells.push(cur.trim()); cur = ''; } else if (prev && gap > 0.2 * h) cur += ' ';
+      cur += it.s;
+      prev = it;
+    }
+    if (cur.trim()) cells.push(cur.trim());
+    return { cells, text: cells.join(' ') };
+  });
+}
+
+const MONEY = /^\(?-?\d{1,3}(?:,?\d{3})*\.\d{2}\)?$/;
+const moneyVal = (s) => (/^\(.*\)$/.test(s) ? -1 : 1) * +s.replace(/[(),]/g, '');
+const CARD_DATE = /^(\d{1,2})\s?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b\s*(.*)$/i;
+function citiCardLabel(name) {
+  const n = String(name).replace(/[^A-Za-z]/g, '').toUpperCase();
+  if (n.includes('PREMIERMILES')) return 'Citi PremierMiles';
+  if (n.includes('REWARDS')) return n.includes('VISA') ? 'Citi Rewards Visa' : 'Citi Rewards';
+  if (n.includes('CASHBACK')) return 'Citi Cash Back';
+  return 'Citi ' + titleCase(String(name).replace(/\d.*$/, '').replace(/\bCITI\b|\bCARD\b/gi, ''));
+}
+
+// Reads a Citibank Singapore credit card statement, one card or several. Payments are counted but
+// not kept; masked card lines, subtotals and page furniture are skipped. Rows keep their day and
+// month; datedRows() adds the year from the statement date.
+function readCitiCard(lines) {
+  const dateOf = (re) => {
+    for (const l of lines) { const m = re.exec(l.text); if (m && monthIndex(m[1])) return isoDate(+m[3], monthIndex(m[1]), +m[2]); }
+    return null;
+  };
+  const stmtDate = dateOf(/STATEMENT\s*DATE:?\s*([A-Za-z]{3,9})\s*(\d{1,2}),?\s*(\d{4})/i);
+  const due = dateOf(/PAYMENT\s*DUE\s*DATE:?\s*([A-Za-z]{3,9})\s*(\d{1,2}),?\s*(\d{4})/i);
+  const pageOf = lines.map((l) => /PAGE\s*\d+\s*OF\s*(\d+)/i.exec(l.text)).find(Boolean);
+  const cards = [], summaries = {};
+  const cardFor = (label) => cards.find((c) => c.card === label) || (cards.push({ card: label, rows: [], payments: 0, paid: 0, payDays: [] }), cards.at(-1));
+  let head = null, wantSummary = null, card = null, last = null;
+  for (const l of lines) {
+    const sq = l.text.replace(/\s+/g, '').toUpperCase();
+    if (/^CITI/.test(sq) && /PAYMENTDUEDATE/.test(sq)) { head = citiCardLabel(l.text.split(/\d|payment/i)[0]); continue; }
+    if (/^PREVIOUSPAYMENTSPURCHASES/.test(sq)) { wantSummary = head; continue; }
+    const nums = l.text.match(/\(?\d[\d,]*\.\d{2}\)?/g);
+    if (wantSummary && nums && nums.length >= 6 && /^[\d,.()\s-]+$/.test(l.text)) { summaries[wantSummary] = nums.slice(0, 6).map(moneyVal); wantSummary = null; continue; }
+    const tf = /^TRANSACTIONSFOR(.+)$/.exec(sq);
+    if (tf) { card = cardFor(citiCardLabel(tf[1])); last = null; continue; }
+    if (!card) continue;
+    if (/GRANDTOTAL/.test(sq)) { card = null; continue; }
+    const fx = /^FOREIGN\s*AMOUNT\s*(.+?)\s*(\d[\d,]*\.\d{2})/i.exec(l.text);
+    if (fx) {
+      if (last) { const f = FX_NAMES.find(([re]) => re.test(fx[1].toUpperCase())); last.fx_currency = f ? f[1] : null; last.fx_amount = +fx[2].replace(/,/g, ''); }
+      continue;
+    }
+    let cells = l.cells, date = CARD_DATE.exec(cells[0] || '');
+    if (date && date[3]) cells = [cells[0].slice(0, cells[0].length - date[3].length).trim(), date[3], ...cells.slice(1)];
+    else if (!date && /^\d{1,2}$/.test(cells[0] || '') && (date = CARD_DATE.exec(`${cells[0]} ${cells[1] || ''}`))) cells = [`${cells[0]} ${cells[1]}`, ...cells.slice(2)];
+    if (!date) continue;
+    let end = -1;
+    for (let i = cells.length - 1; i > 0; i--) if (MONEY.test(cells[i])) { end = i; break; }
+    if (end < 1) continue;
+    const amount = moneyVal(cells[end]), middle = cells.slice(1, end).filter((c) => !MONEY.test(c)), text = middle.join(' ');
+    if (!text) continue;
+    if (amount < 0 && /^PAYMENT\b/i.test(text)) { card.payments++; card.paid = cents(card.paid - amount); card.payDays.push({ day: +date[1], mon: monthIndex(date[2]) }); last = null; continue; }
+    last = { day: +date[1], mon: monthIndex(date[2]), description: scrub(text), merchant: merchantKey(middle[0]) || merchantKey(text) || 'CARD TRANSACTION', amount, fx_currency: null, fx_amount: null, ...splitCountry(middle.slice(1)) };
+    card.rows.push(last);
+  }
+  for (const c of cards) c.summary = summaries[c.card] || null;
+  return { stmtDate, due, pages: pageOf ? +pageOf[1] : null, cards };
+}
+
+// Without a statement date, it's about 25 days before the due date, moved to the day of the month
+// the other statements close on when that's within 6 days.
+function statementDateFromDue(due, closeDays) {
+  const est = addDays(due, -25), count = {};
+  for (const d of closeDays) count[d] = (count[d] || 0) + 1;
+  const day = +Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+  if (!day) return est;
+  const tries = [-1, 0, 1].map((k) => { const m = shiftMonth(est.slice(0, 7), k); return isoDate(+m.slice(0, 4), +m.slice(5), Math.min(day, +monthEnd(m).slice(8))); });
+  const best = tries.sort((a, b) => Math.abs(daysBetween(a, est)) - Math.abs(daysBetween(b, est)))[0];
+  return Math.abs(daysBetween(best, est)) <= 6 ? best : est;
+}
+
+// A card's rows with full dates. Lines have no year: they take the statement's, or the year before
+// when their month is later than the statement's (December lines on a January statement).
+function datedRows(card, stmtDate) {
+  const y = +stmtDate.slice(0, 4), m = +stmtDate.slice(5, 7);
+  return card.rows.map(({ day, mon, ...r }) => ({ ...r, date: isoDate(mon > m ? y - 1 : y, mon, day) })).filter((r) => r.date);
+}
+
+// Checks a card's lines against its summary: purchases against the other positive lines, credits
+// (less payments) against the other refunds, and fees and interest against the fee lines. Citi nets
+// a fee reversal into fees, so that column is taken from the balance: current − previous +
+// payments and credits − purchases. A mismatch is a warning, not a refusal: pdf.js can drop a line.
+const FEE_LINE = /CCY ?CONVERSION FEE|ANNUAL MEMBER|MEMBERSHIP FEE|GST ON|LATE CHARGE|FINANCE CHARGE|INTEREST CHARGE/i;
+function reconcileCard(card) {
+  if (!card.summary) return { ok: null, text: 'No summary for this card in the file, so its lines could not be checked.' };
+  const [prev, payCred, purchases, , , current] = card.summary;
+  const sum = (f) => cents(card.rows.filter(f).reduce((t, r) => t + r.amount, 0));
+  const diffs = [
+    ['purchases', cents(sum((r) => r.amount > 0 && !FEE_LINE.test(r.description)) - purchases)],
+    ['refunds', cents(-sum((r) => r.amount < 0 && !FEE_LINE.test(r.description)) - (payCred - card.paid))],
+    ['fees and interest', cents(sum((r) => FEE_LINE.test(r.description)) - (current - prev + payCred - purchases))],
+  ].filter(([, d]) => Math.abs(d) >= 0.005);
+  if (!diffs.length) return { ok: true, text: 'Adds up with the statement summary.' };
+  return { ok: false, text: `Doesn't add up: ${diffs.map(([k, d]) => `${k} are ${sgd2(Math.abs(d))} ${d < 0 ? 'short of' : 'over'} the summary`).join(', and ')}. A line may not have been read; you can still save.` };
+}
+
+// ----- UOB card transaction history (.xls) -----
+// Rows come from SheetJS as arrays. The account number row is never read; the description keeps
+// only its first line (the Ref No goes) and splits on runs of spaces into merchant, city, country.
+function readUob(rows) {
+  const find = (label) => rows.find((r) => String(r[0] || '').trim().toLowerCase() === label);
+  const h = rows.findIndex((r) => /^transaction date$/i.test(String(r[0] || '').trim()));
+  if (h < 0) return { error: "Couldn't find the transactions table (a row starting Transaction Date) in this file." };
+  const col = (re) => rows[h].findIndex((c) => re.test(String(c)));
+  const cPost = col(/posting/i), cDesc = col(/description/i), cFxT = col(/foreign currency type/i), cFxA = col(/amount\s*\(foreign\)/i), cAmt = col(/amount\s*\(local\)/i);
+  if (cDesc < 0 || cAmt < 0) return { error: "Couldn't find the Description and Transaction Amount(Local) columns." };
+  const day = (v) => { const m = /^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})$/.exec(String(v || '').trim()); return m && monthIndex(m[2]) ? isoDate(+m[3], monthIndex(m[2]), +m[1]) : null; };
+  const type = find('account type:'), period = find('statement date:');
+  const pm = period && /(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})\s*to\s*(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})/i.exec(String(period[1] || ''));
+  const out = { card: 'UOB ' + (titleCase(String(type && type[1] || '').replace(/\bCARD\b/i, '')) || 'card'), start: pm && day(pm[1]), end: pm && day(pm[2]), rows: [], payments: 0, paid: 0 };
+  for (const r of rows.slice(h + 1)) {
+    const date = day(r[0]);
+    if (!date) continue;
+    const raw = String(r[cDesc] || '').split('\n')[0].trim(), amount = cents(Number(String(r[cAmt]).replace(/,/g, '')));
+    if (!raw || !isFinite(amount) || !amount) continue;
+    if (amount < 0 && /^PAYMT\b|^PAYMENT\b/i.test(raw)) { out.payments++; out.paid = cents(out.paid - amount); continue; }
+    const segs = raw.split(/\s{2,}/).map((s) => s.trim()).filter(Boolean);
+    const fxCur = String(cFxT >= 0 && r[cFxT] || '').trim().toUpperCase(), fxAmt = Number(String(cFxA >= 0 && r[cFxA] || '').replace(/,/g, ''));
+    let { country } = splitCountry(segs.slice(1));
+    if (!country && FX_COUNTRY[fxCur]) country = FX_COUNTRY[fxCur];
+    out.rows.push({ date, posted: day(cPost >= 0 ? r[cPost] : ''), description: scrub(segs.join(' ')), merchant: merchantKey(segs[0]) || 'CARD TRANSACTION', amount, country,
+      fx_currency: /^[A-Z]{3}$/.test(fxCur) && fxCur !== 'SGD' ? fxCur : null, fx_amount: fxCur && fxCur !== 'SGD' && isFinite(fxAmt) && fxAmt ? fxAmt : null });
+  }
+  if (!out.start || !out.end) { const ds = out.rows.map((x) => x.date).sort(); out.start = out.start || ds[0]; out.end = out.end || ds.at(-1); }
+  if (!out.start) return { error: 'No transactions with dates in this file.' };
+  return out;
+}
+
+// ----- Citibank account outflows (from readCiti) -----
+// Withdrawals become rows, except card bill payments. Deposits are left out unless they come from a
+// payee paid before (a refund). Only S$ accounts are read.
+const CARD_BILL = /PAYMENT TO CITI CREDIT CARD|CITI\s?CARD|CREDIT CARD PAYMENT|UOB CARD|BILL PAYMENT.*CARD/i;
+function bankParts(r, paidBefore) {
+  const parts = [];
+  for (const a of r.accounts.filter((x) => x.currency === 'SGD' && x.details)) {
+    const part = { source: 'citi_bank', card: a.name, start: r.start || r.end.slice(0, 8) + '01', end: r.end, rows: [], payments: 0, paid: 0 };
+    const payees = new Set(paidBefore);
+    for (const t of a.txs.filter((x) => x.signed < 0)) {
+      if (CARD_BILL.test(t.desc)) { part.payments++; part.paid = cents(part.paid - t.signed); continue; }
+      const merchant = bankMerchant(t.desc);
+      payees.add(merchant);
+      part.rows.push({ date: t.date, description: scrub(t.desc) || merchant, merchant, amount: cents(-t.signed), country: null });
+    }
+    for (const t of a.txs.filter((x) => x.signed > 0)) {
+      const merchant = bankMerchant(t.desc);
+      if (payees.has(merchant) && !/SALARY|INTEREST/i.test(t.desc)) part.rows.push({ date: t.date, description: scrub(t.desc) || merchant, merchant, amount: cents(-t.signed), country: null });
+    }
+    parts.push(part);
+  }
+  return parts;
+}
+
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return loadXlsx.p || (loadXlsx.p = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'js/xlsx.full.min.js';
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => { loadXlsx.p = null; reject(new Error('The spreadsheet reader did not load. Reload the page and try again.')); };
+    document.head.appendChild(s);
+  }));
+}
+
+// The type is told from the content: a PDF with "TRANSACTIONS FOR CITI" is a card statement,
+// another PDF is tried as a Citibank account statement, and an Excel file as a UOB export.
+async function readSpendFile(bytes) {
+  if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    const pages = await pdfPages(bytes), lines = pages.flatMap(cardLines);
+    if (lines.some((l) => /TRANSACTIONS\s*FOR\s*CITI/i.test(l.text))) {
+      const r = readCitiCard(lines);
+      return r.cards.length ? { kind: 'citi_card', ...r } : { error: "This looks like a Citi card statement, but no card's transactions could be read." };
+    }
+    const r = readCiti(pages.flatMap(textLines));
+    return r.error ? { error: `Not a Citi card statement, and not readable as a Citibank account statement: ${r.error}` } : { kind: 'citi_bank', bank: r };
+  }
+  if ((bytes[0] === 0xd0 && bytes[1] === 0xcf) || (bytes[0] === 0x50 && bytes[1] === 0x4b)) {
+    const X = await loadXlsx(), wb = X.read(bytes, { type: 'array' });
+    const rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+    const u = readUob(rows);
+    return u.error ? { error: `Not a UOB card transaction history: ${u.error}` } : { kind: 'uob_card', uob: u };
+  }
+  return { error: 'Pick a Citi card statement PDF, a Citibank account statement PDF or a UOB card export (.xls).' };
+}
+
+// ----- import: preview, then save -----
+let spendImport = null;
+async function importSpending(files) {
+  spendImport = { busy: true };
+  renderSpendImport();
+  const list = [];
+  for (const f of files) {
+    try { list.push({ name: scrub(f.name), ...(await readSpendFile(new Uint8Array(await f.arrayBuffer()))) }); }
+    catch (e) { list.push({ name: scrub(f.name), error: `Couldn't read this file (${e && e.message ? e.message : e}).` }); }
+  }
+  const cards = list.filter((x) => x.kind === 'citi_card');
+  const closeDays = [...api.data.statements.filter((s) => s.source === 'citi_card').map((s) => +s.period_end.slice(8)), ...cards.filter((x) => x.stmtDate).map((x) => +x.stmtDate.slice(8))];
+  for (const f of cards) if (!f.stmtDate && f.due) f.stmtDate = statementDateFromDue(f.due, closeDays);
+  // A card with nothing due has no dates on its statement. It takes the date of another file from
+  // the same statement (same page count): the earliest one its lines and payments fit. Otherwise it asks.
+  for (const f of cards.filter((x) => !x.stmtDate)) {
+    const days = f.cards.flatMap((c) => [...c.rows, ...c.payDays]);
+    const fits = (sd) => days.length && days.every(({ day, mon }) => { const y = +sd.slice(0, 4) - (mon > +sd.slice(5, 7) ? 1 : 0), dt = isoDate(y, mon, day); return dt && dt <= sd && dt >= addDays(sd, -62); });
+    const sib = cards.filter((x) => x !== f && x.stmtDate && x.pages && x.pages === f.pages && fits(x.stmtDate)).sort((a, b) => a.stmtDate.localeCompare(b.stmtDate))[0];
+    if (sib) { f.stmtDate = sib.stmtDate; f.borrowed = true; }
+  }
+  spendImport = { files: list };
+  buildSpendImport();
+  renderSpendImport();
+}
+
+// Lines already stored are found by ref, or by the same card, date and amount (each stored line
+// matching once), since lines imported another way may have other merchant keys. A matched line takes
+// the stored ref, so the database skips it. A new line from a merchant already stored keeps its key.
+function buildSpendImport() {
+  const d = api.data, rules = d.expense_rules || [], known = new Set(d.expenses.map((e) => e.ref)), seen = new Set();
+  const paidBefore = new Set(d.expenses.filter((e) => e.source === 'citi_bank' && Number(e.amount) > 0).map((e) => e.merchant));
+  const slot = (r) => `${r.source}|${r.card}|${r.date}|${Number(r.amount).toFixed(2)}`, free = {}, keyOf = {};
+  for (const e of d.expenses) {
+    (free[slot(e)] = free[slot(e)] || []).push(e.ref);
+    keyOf[e.source + '|' + descLetters(e.description)] = e.merchant;
+  }
+  const part = (source, card, start, end, rows, payments, check) => ({ statement: { source, card, period_start: start, period_end: end }, payments, check,
+    rows: rows.map((r) => ({ posted: null, fx_currency: null, fx_amount: null, country: null, ...r, source, card, amount: cents(r.amount) })) });
+  for (const f of spendImport.files) {
+    f.parts = [];
+    if (f.error) continue;
+    if (f.kind === 'citi_card') {
+      if (!f.stmtDate) continue;
+      for (const c of f.cards) f.parts.push(part('citi_card', c.card, addDays(addMonths(f.stmtDate, -1), 1), f.stmtDate, datedRows(c, f.stmtDate), c.payments, reconcileCard(c)));
+    } else if (f.kind === 'uob_card') {
+      const u = f.uob;
+      f.parts.push(part('uob_card', u.card, u.start, u.end, u.rows, u.payments, { ok: null, text: 'The export has no totals to check against.' }));
+    } else {
+      for (const p of bankParts(f.bank, paidBefore)) f.parts.push(part('citi_bank', p.card, p.start, p.end, p.rows, p.payments, { ok: true, text: 'The account added up when read.' }));
+    }
+    // Identical lines are counted across the whole file, so the refs match whichever way it's split.
+    const refs = withRefs(f.parts.flatMap((p) => p.rows)).map((r) => r.ref);
+    let i = 0;
+    for (const p of f.parts) {
+      p.dupes = 0;
+      p.rows = p.rows.map((r) => {
+        let ref = refs[i++], dupe = known.has(ref) || seen.has(ref);
+        const merchant = keyOf[r.source + '|' + descLetters(r.description)] || r.merchant;
+        if (!dupe && free[slot(r)] && free[slot(r)].length) { seen.add(ref); ref = free[slot(r)].shift(); dupe = true; }
+        if (known.has(ref) && free[slot(r)]) { const k = free[slot(r)].indexOf(ref); if (k >= 0) free[slot(r)].splice(k, 1); }
+        if (dupe) p.dupes++;
+        seen.add(ref);
+        const row = { ...r, merchant, ref };
+        return { ...row, ...categorise(row, rules) };
+      });
+      Object.assign(p.statement, { purchases: cents(p.rows.reduce((t, r) => t + (r.amount > 0 ? r.amount : 0), 0)), credits: cents(p.rows.reduce((t, r) => t + (r.amount < 0 ? -r.amount : 0), 0)), lines: p.rows.length });
+    }
+  }
+}
+
+function renderSpendImport() {
+  const el = $('spend-import');
+  if (!spendImport) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  el.classList.remove('error');
+  if (spendImport.busy) { el.innerHTML = '<p>Reading the files in this browser…</p>'; return; }
+  let fresh = 0, stmts = 0;
+  const files = spendImport.files.map((f, i) => {
+    if (f.error) return `<h3>${esc(f.name)}</h3><p class="err">${esc(f.error)}</p>`;
+    if (f.kind === 'citi_card' && !f.stmtDate) {
+      return `<h3>${esc(f.name)}</h3><p>This statement shows no statement or due date (nothing was due). Enter its statement date to read it:
+        <input type="date" data-sdate="${i}"> <button class="btn" type="button" data-usedate="${i}">Use this date</button></p>`;
+    }
+    const parts = f.parts.map((p) => {
+      const n = p.rows.length - p.dupes;
+      fresh += n; stmts++;
+      const check = p.check.ok === false ? `<span class="down">${esc(p.check.text)}</span>` : p.check.ok ? `<span class="ok">${esc(p.check.text)}</span>` : `<span class="muted">${esc(p.check.text)}</span>`;
+      return `<tr><td class="desc">${esc(p.statement.card)}</td><td>${longDate(p.statement.period_start)} to ${longDate(p.statement.period_end)}</td><td>${p.rows.length}</td>
+        <td>${sgd2(p.statement.purchases)}</td><td>${sgd2(p.statement.credits)}</td><td>${p.payments}</td><td>${p.dupes ? `${p.dupes} already in` : 'none'}</td><td class="desc">${check}</td></tr>`;
+    }).join('');
+    return `<h3>${esc(f.name)}${f.borrowed ? ' <span class="muted">(dated from another file of the same statement)</span>' : ''}</h3>
+      <table><tr><th class="desc">Card or account</th><th>Period</th><th>Lines</th><th>Purchases</th><th>Credits</th><th>Bill payments left out</th><th>Duplicates</th><th class="desc">Check</th></tr>${parts}</table>`;
+  }).join('');
+  el.innerHTML = `<h2>Import statements</h2><p>Nothing is saved until you choose Save. Card numbers, account numbers and references are left out.</p>${files}
+    <p class="actions"><button class="btn primary" type="button" data-spendsave ${fresh || stmts ? '' : 'disabled'}>Save ${fresh} new line${fresh === 1 ? '' : 's'}</button>
+    <button class="btn" type="button" data-spendcancel>Cancel</button></p>`;
+}
+
+async function saveSpendImport() {
+  const payload = spendImport.files.flatMap((f) => f.parts || []).map((p) => ({ statement: p.statement, rows: p.rows.map(({ ref, ...r }) => ({ ...r, ref })) }));
+  if (!payload.length) return;
+  try {
+    const d = await api.saveExpenses(payload);
+    spendImport = null;
+    toast(`Added ${d.added} line${d.added === 1 ? '' : 's'}${d.skipped ? `; ${d.skipped} were already in` : ''}`);
+    showSpending(d);
+  } catch (e) { toast(saveError(e), true); }
+}
+
+// ----- analysis: pure functions over the rows -----
+// Totals by month, category and subcategory, by transaction date, net of anything paid back.
+function spendMonthly(rows) {
+  const out = {};
+  for (const r of rows) {
+    const m = r.date.slice(0, 7), v = netOf(r), o = out[m] || (out[m] = { total: 0, cats: {}, subs: {} });
+    o.total += v;
+    o.cats[r.category] = (o.cats[r.category] || 0) + v;
+    const k = r.category + '|' + (r.subcategory || '');
+    o.subs[k] = (o.subs[k] || 0) + v;
+  }
+  return out;
+}
+
+// Months each source's statements cover in full (its periods joined end to end).
+function coverage(stmts) {
+  const per = {}, full = {};
+  for (const s of stmts) (per[s.source] = per[s.source] || []).push([s.period_start, s.period_end]);
+  for (const [src, list] of Object.entries(per)) {
+    list.sort((a, b) => a[0].localeCompare(b[0]));
+    const merged = [];
+    for (const [a, b] of list) { const l = merged.at(-1); if (l && a <= addDays(l[1], 1)) { if (b > l[1]) l[1] = b; } else merged.push([a, b]); }
+    full[src] = new Set();
+    for (const [a, b] of merged) for (let m = a.slice(0, 7); m <= b.slice(0, 7); m = nextMonth(m)) if (a <= m + '-01' && b >= monthEnd(m)) full[src].add(m);
+  }
+  return full;
+}
+
+// The average over the 12 months up to each month, dividing by the months covered in that window.
+function rolling12(months, value, covered) {
+  return months.map((m) => {
+    let t = 0, n = 0;
+    for (let k = 0; k < 12; k++) { const w = shiftMonth(m, -k); if (covered(w)) { t += value(w); n++; } }
+    return n ? t / n : null;
+  });
+}
+
+// Rows worth a second look, each with its reasons. History before the period counts for medians,
+// first visits and duplicates. Only rows still counted as recurring are checked (travel, one-offs
+// and paid-back rows are already labelled), and rows marked "not a standout" are left out.
+function standouts(all, from, to) {
+  const live = all.filter((r) => r.kind !== 'excluded' && !NOT_SPENDING.test(r.category)).sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+  const byM = {}, byCat = {}, first = live.length ? live[0].date : null;
+  for (const r of live) {
+    (byM[r.merchant] = byM[r.merchant] || []).push(r);
+    if (r.amount > 0) (byCat[r.category] = byCat[r.category] || []).push(r.amount);
+  }
+  const p95 = {};
+  for (const [c, v] of Object.entries(byCat)) if (v.length >= 20) p95[c] = quantile(v, 0.95);
+  const out = [];
+  for (const r of live) {
+    const m = r.date.slice(0, 7);
+    if (m < from || m > to || r.amount <= 0 || r.kind !== 'recurring' || /not a standout/i.test(r.note || '')) continue;
+    const hist = byM[r.merchant], before = hist.slice(0, hist.indexOf(r)), paid = before.filter((x) => x.amount > 0), reasons = [];
+    if (r.amount >= BIG_ONE && !['Bills', 'Tax', 'Household'].includes(r.category)) reasons.push(`${sgd2(r.amount)} in one go`);
+    const med = paid.length >= 3 ? median(paid.map((x) => x.amount)) : null, routine = ['Bills', 'Tax', 'Household'].includes(r.category);
+    if (med && r.amount > 3 * med && r.amount >= 50) reasons.push(`${(r.amount / med).toFixed(1)}× the usual ${sgd2(med)} here`);
+    else if (p95[r.category] && r.amount > p95[r.category] && r.amount >= 100 && !routine && !reasons.length) reasons.push(`More than 95% of ${r.category.toLowerCase()} purchases`);
+    if (!before.length && r.amount >= FIRST_TIME && daysBetween(first, r.date) >= 90) reasons.push('First time at this merchant');
+    const twin = before.find((x) => x.amount === r.amount && daysBetween(x.date, r.date) <= 2);
+    if (twin && r.amount >= 20) reasons.push(`Same amount here on ${dayMonth(twin.date)}: charged twice?`);
+    if (reasons.length) out.push({ row: r, reasons });
+  }
+  return out;
+}
+
+// Merchants charged in at least 3 of the 4 months up to `to`, at a similar amount (within 15%).
+// A latest charge more than 10% off the earlier ones is a price change.
+function recurringCharges(rows, to) {
+  const months = [shiftMonth(to, -3), shiftMonth(to, -2), shiftMonth(to, -1), to], by = {};
+  for (const r of rows) {
+    const m = r.date.slice(0, 7);
+    if (r.kind !== 'recurring' || r.amount <= 0 || !months.includes(m)) continue;
+    const g = by[r.merchant] || (by[r.merchant] = { months: {}, count: 0, last: null });
+    g.months[m] = (g.months[m] || 0) + r.amount;
+    g.count++;
+    if (!g.last || r.date > g.last.date) g.last = r;
+  }
+  const out = [];
+  for (const [merchant, g] of Object.entries(by)) {
+    const present = months.filter((m) => g.months[m]);
+    if (present.length < 3 || g.count > present.length * 2) continue;
+    const vals = present.map((m) => g.months[m]), earlier = vals.slice(0, -1), med = median(earlier), latest = vals.at(-1);
+    if (!earlier.every((v) => Math.abs(v - med) <= 0.15 * med)) continue;
+    const change = Math.abs(latest - med) > 0.1 * med ? { from: med, to: latest } : null;
+    out.push({ merchant, last: g.last, monthly: latest, yearly: latest * 12, change });
+  }
+  return out.sort((a, b) => b.monthly - a.monthly);
+}
+
+// Travel by trip: one line per trip, plus bookings paid ahead from Singapore (not in a trip yet)
+// and travel abroad that isn't in a trip. Columns are the travel subcategories.
+function tripTable(rows, trips) {
+  const lines = new Map(), byId = Object.fromEntries(trips.map((t) => [t.id, t]));
+  const line = (key, name, trip) => {
+    if (!lines.has(key)) lines.set(key, { key, name, trip, subs: {}, total: 0, days: trip && trip.start_date && trip.end_date ? daysBetween(trip.start_date, trip.end_date) + 1 : null });
+    return lines.get(key);
+  };
+  for (const r of rows) {
+    const sub = r.category === 'Travel' ? (TRAVEL_SUBS.includes(r.subcategory) ? r.subcategory : 'Food and drink') : TRAVEL_SUB[r.category] || 'Shopping';
+    const t = r.trip_id && byId[r.trip_id];
+    const l = t ? line('t' + t.id, t.name, t) : isAbroad(r) ? line('unassigned', 'Unassigned travel') : line('upcoming', 'Upcoming (paid ahead)');
+    l.subs[sub] = (l.subs[sub] || 0) + netOf(r);
+    l.total += netOf(r);
+  }
+  const order = (l) => (l.trip ? l.trip.start_date || '9' : l.key === 'upcoming' ? '~1' : '~2');
+  return [...lines.values()].sort((a, b) => (order(b) > order(a) ? 1 : -1)).sort((a, b) => (a.trip ? 0 : 1) - (b.trip ? 0 : 1));
+}
+
+// Travel abroad not yet in a trip, grouped by date: a gap of more than 3 days starts a new trip.
+// Each is named after its most common country and the month it starts.
+function suggestTrips(all, trips) {
+  const inTrip = (r) => r.trip_id || trips.some((t) => t.start_date && t.end_date && r.date >= t.start_date && r.date <= t.end_date);
+  const pts = all.filter((r) => r.kind === 'travel' && r.country && r.country !== 'SG' && !inTrip(r)).sort((a, b) => a.date.localeCompare(b.date));
+  const groups = [];
+  for (const r of pts) {
+    const g = groups.at(-1);
+    if (g && daysBetween(g.end, r.date) <= 3) { g.end = r.date; g.rows.push(r); } else groups.push({ start: r.date, end: r.date, rows: [r] });
+  }
+  return groups.map((g) => {
+    const count = {};
+    for (const r of g.rows) count[r.country] = (count[r.country] || 0) + 1;
+    const c = Object.keys(count).sort((a, b) => count[b] - count[a])[0];
+    return { ...g, name: `${regionName(c)}, ${MONTH_NAMES[+g.start.slice(5, 7) - 1].slice(0, 3)} ${g.start.slice(0, 4)}`, total: g.rows.reduce((t, r) => t + netOf(r), 0) };
+  });
+}
+
+// ----- the tab -----
+const spendState = Object.assign({ range: '12', from: '', to: '', kinds: { recurring: true, travel: true, one_off: false, reimbursed: false, excluded: false }, off: {} }, prefs.get('spend', {}));
+const saveSpendState = () => prefs.set('spend', spendState);
+let spendWired = false, spendOpen = new Set(), spendPick = null, spendChart = null, tripDraft = null, payBackId = null, tripPickId = null;
+
+// Everything the views need for the chosen period, kinds and sources.
+function spendView(d) {
+  const all = d.expenses.map((r) => ({ ...r, amount: Number(r.amount), reimbursed: Number(r.reimbursed) || 0 }));
+  const key = (r) => `${r.source}|${r.card}`;
+  const sources = [...new Set([...d.statements.map(key), ...all.map(key)])].sort();
+  const srcOn = (r) => !spendState.off[key(r)];
+  const latest = all.reduce((m, r) => (r.date > m ? r.date : m), '').slice(0, 7) || isoDay(new Date()).slice(0, 7);
+  const mine = all.filter(srcOn), rows = mine.filter((r) => spendState.kinds[r.kind]);
+  // A month is covered when any source's statements cover all of it, and complete when every source
+  // that had started by then does (a card counts from its first statement on).
+  const stmts = d.statements.filter(srcOn), cov = coverage(stmts), covSets = Object.values(cov), began = {};
+  for (const s of stmts) if (!began[s.source] || s.period_start < began[s.source]) began[s.source] = s.period_start;
+  const withRows = new Set(mine.map((r) => r.date.slice(0, 7)));
+  const covered = (m) => (covSets.length ? covSets.some((s) => s.has(m)) : withRows.has(m));
+  const complete = (m) => {
+    if (!covSets.length) return withRows.has(m);
+    const live = Object.keys(cov).filter((src) => began[src] <= monthEnd(m));
+    return live.length > 0 && live.every((src) => cov[src].has(m));
+  };
+  // The period ends on the latest complete month (a month still coming in would look low).
+  let to = latest, from;
+  for (let m = latest, k = 0; k < 3; m = shiftMonth(m, -1), k++) if (complete(m)) { to = m; break; }
+  if (spendState.range === 'custom' && /^\d{4}-\d{2}$/.test(spendState.from) && /^\d{4}-\d{2}$/.test(spendState.to) && spendState.from <= spendState.to) { from = spendState.from; to = spendState.to; }
+  else if (spendState.range === 'year') from = to.slice(0, 4) + '-01';
+  else from = shiftMonth(to, -(+spendState.range || 12) + 1);
+  const months = [];
+  for (let m = from; m <= to; m = nextMonth(m)) months.push(m);
+  const monthly = spendMonthly(rows), recurring = spendMonthly(mine.filter((r) => r.kind === 'recurring'));
+  const val = (mo, m) => (mo[m] ? mo[m].total : 0);
+  const avgOver = (mo, list, pick = (x) => (x ? x.total : 0)) => { const c = list.filter(covered); return c.length ? c.reduce((t, m) => t + pick(mo[m]), 0) / c.length : null; };
+  return { d, all, mine, rows, sources, key, from, to, months, cov, covered, complete, monthly, recurring, val, avgOver, inRange: (r) => r.date.slice(0, 7) >= from && r.date.slice(0, 7) <= to };
+}
+
+function setSpendBadge(d, v) {
+  const n = Array.isArray(d.expenses) && v ? reviewItems(v).length : 0;
+  $('tab-spending').textContent = n ? `Spending (${n})` : 'Spending';
+}
 
 function showSpending(d) {
   const on = Array.isArray(d.expenses);
   $('spend-off').hidden = on;
   $('spend-body').hidden = !on;
-  if (!on) return;
-  const rows = d.expenses, stmts = d.statements;
-  $('spend-summary').textContent = rows.length
-    ? `${rows.length.toLocaleString('en-SG')} transactions, ${monthLong(rows[0].date.slice(0, 7))} to ${monthLong(rows.at(-1).date.slice(0, 7))}.`
-    : 'Nothing imported yet.';
-  $('spend-statements').hidden = !stmts.length;
-  $('spend-statements').innerHTML = stmts.length ? `<tr><th>From</th><th>Card</th><th>Period</th><th>Lines</th></tr>` + stmts.slice().reverse().map((s) =>
-    `<tr><td>${SPEND_SOURCES[s.source] || esc(s.source)}</td><td>${esc(s.card)}</td><td>${longDate(s.period_start)} to ${longDate(s.period_end)}</td><td>${s.lines == null ? '' : s.lines}</td></tr>`).join('') : '';
+  if (!on) { setSpendBadge(d); return; }
+  wireSpending();
+  const v = spendView(d);
+  setSpendBadge(d, v);
+  renderSpendImport();
+  renderSpendFilters(v);
+  renderSpendHead(v);
+  renderSpendChart(v);
+  renderSpendCats(v);
+  renderSpendTxs(v);
+  renderStandouts(v);
+  renderRecurring(v);
+  renderTravel(v);
+  renderReview(v);
+  renderImported(v);
+  renderRules(v);
 }
+
+function renderSpendFilters(v) {
+  const s = spendState, chip = (attr, id, label, on, color) => `<button type="button" class="chip" ${attr}="${esc(id)}" aria-pressed="${on}"${color ? ` style="--c:var(${color})"` : ''}><span class="dot"></span>${esc(label)}</button>`;
+  const ranges = [['12', 'Last 12 months'], ['24', 'Last 24 months'], ['year', 'This year'], ['custom', 'Pick months']];
+  $('spend-filters').innerHTML = `
+    <div class="seg" id="spend-range">${ranges.map(([id, n]) => `<button type="button" data-range="${id}" aria-pressed="${s.range === id}">${n}</button>`).join('')}</div>
+    ${s.range === 'custom' ? `<label class="muted">From <input type="month" id="spend-from" value="${esc(s.from || v.from)}"></label><label class="muted">to <input type="month" id="spend-to" value="${esc(s.to || v.to)}"></label>` : ''}
+    <div class="chips">${SPEND_KINDS.map(([id, n]) => chip('data-kind', id, n, !!s.kinds[id], id === 'travel' ? '--sp-travel' : '--ink-3')).join('')}</div>
+    ${v.sources.length > 1 ? `<div class="chips">${v.sources.map((k) => { const [src, card] = k.split('|'); return chip('data-src', k, card || SPEND_SOURCES[src] || src, !s.off[k], '--accent'); }).join('')}</div>` : ''}`;
+}
+
+function renderSpendHead(v) {
+  const { to, monthly, recurring, val, mine, d } = v;
+  const last12 = [];
+  for (let k = 11; k >= 0; k--) last12.push(shiftMonth(to, -k));
+  const base = v.avgOver(recurring, last12);
+  const travel = mine.filter((r) => r.kind === 'travel' && r.date.slice(0, 7) >= last12[0] && r.date.slice(0, 7) <= to).reduce((t, r) => t + netOf(r), 0);
+  // Coverage per card or account: first and last month, and any month missing in between.
+  const byKey = {};
+  for (const s of d.statements) (byKey[v.key(s)] = byKey[v.key(s)] || []).push(s);
+  const cov = Object.entries(byKey).map(([k, list]) => {
+    const months = coverage(list)[list[0].source] || new Set(), sorted = [...months].sort();
+    if (!sorted.length) return `${esc(k.split('|')[1] || k)}: part of a month only`;
+    const gaps = [];
+    for (let m = sorted[0]; m <= sorted.at(-1); m = nextMonth(m)) if (!months.has(m)) gaps.push(monthShort(m));
+    return `${esc(k.split('|')[1])}: ${monthShort(sorted[0])} to ${monthShort(sorted.at(-1))}${gaps.length ? `, missing ${gaps.slice(0, 4).join(', ')}${gaps.length > 4 ? '…' : ''}` : ''}`;
+  });
+  // Itemised spending against the spending worked out from cash, for the latest month that has both.
+  const inferred = compute(d).filter((r) => r.spending != null && monthly[r.month]);
+  const pair = inferred.find((r) => r.month === to) || inferred.at(-1);
+  const itemised = pair && mine.filter((r) => r.date.slice(0, 7) === pair.month && r.kind !== 'excluded').reduce((t, r) => t + netOf(r), 0);
+  const card = (label, value, sub) => `<div class="class"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  $('spend-head').innerHTML = [
+    card(`Spent in ${monthLong(to)}`, money(val(monthly, to)), v.complete(to) ? 'the kinds shown' : 'not every card or account covers this month yet'),
+    card('Usual month', base == null ? '–' : money(base), 'recurring spending, 12-month average'),
+    card('Travel, last 12 months', money(travel), ''),
+    pair ? card(`Against cash, ${monthShort(pair.month)}`, money(itemised), `worked out from cash: ${money(pair.spending)}, a gap of ${signed(itemised - pair.spending)}`) : '',
+    card('Statements cover', '', cov.length ? cov.join('<br>') : 'nothing yet: import statements to start'),
+  ].join('');
+}
+
+function renderSpendChart(v) {
+  const months = v.months.slice(-24), cats = allCats(v.d).filter((c) => months.some((m) => v.monthly[m] && v.monthly[m].cats[c]));
+  const lighten = (hex) => (/^#[0-9a-f]{6}$/i.test(hex) ? hex + '59' : hex);
+  const incomplete = months.filter((m) => !v.complete(m));
+  $('spend-charttitle').textContent = 'Spending by category, month by month';
+  $('spend-chartnote').textContent = (incomplete.length ? `Paler bars: months not every card or account covers yet (${incomplete.map(monthShort).join(', ')}). ` : '') + 'The line is the 12-month average of what is shown.';
+  $('spend-legend').innerHTML = cats.map((c) => `<span class="legend" style="--c:var(${catVar(c)})"><span class="dot"></span>${esc(c)}</span>`).join('');
+  const avg = rolling12(months, (m) => v.val(v.monthly, m), v.covered);
+  const datasets = cats.map((c) => {
+    const color = css(catVar(c));
+    return { type: 'bar', label: c, stack: 'cats', data: months.map((m) => (v.monthly[m] && v.monthly[m].cats[c]) || 0), backgroundColor: months.map((m) => (v.complete(m) ? color : lighten(color))), borderRadius: 2, maxBarThickness: 28 };
+  });
+  datasets.push({ type: 'line', label: '12-month average', stack: 'avg', data: avg, borderColor: css('--ink'), backgroundColor: css('--ink'), borderWidth: 2, pointRadius: 0, tension: 0.2 });
+  const grid = css('--line'), tick = css('--ink-2');
+  spendChart?.destroy();
+  spendChart = new Chart($('spend-chart'), {
+    type: 'bar',
+    data: { labels: months.map(monthShort), datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { stacked: true, grid: { display: false }, border: { color: grid }, ticks: { color: tick, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+        y: { stacked: true, grid: { color: grid }, border: { display: false }, ticks: { color: tick, callback: compact, maxTicksLimit: 6 } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: css('--ink'), titleColor: css('--bg'), bodyColor: css('--bg'), footerColor: css('--bg'), padding: 10, boxPadding: 4,
+          filter: (i) => i.parsed.y != null && Math.abs(i.parsed.y) >= 0.5,
+          itemSort: (a, b) => b.parsed.y - a.parsed.y,
+          callbacks: {
+            title: (items) => monthLong(months[items[0].dataIndex]),
+            label: (i) => ` ${i.dataset.label}  ${money(i.parsed.y)}`,
+            footer: (items) => 'Total  ' + money(v.val(v.monthly, months[items[0].dataIndex])),
+          },
+        },
+      },
+    },
+  });
+  $('spend-chart').setAttribute('aria-label', 'Spending by category for each month, with the 12-month average');
+}
+
+const spark = (vals, cssVar) => {
+  const max = Math.max(...vals, 1), pts = vals.map((x, i) => `${(i * 72) / Math.max(1, vals.length - 1) + 1},${19 - (Math.max(0, x) / max) * 17}`).join(' ');
+  return `<svg class="spark" width="74" height="20" viewBox="0 0 74 20" aria-hidden="true" style="color:var(${cssVar})"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+};
+
+function renderSpendCats(v) {
+  const { to, monthly } = v, prev = shiftMonth(to, -1);
+  const last3 = [to, prev, shiftMonth(to, -2)], last12 = Array.from({ length: 12 }, (_, k) => shiftMonth(to, k - 11));
+  const pick = (k, sub) => (x) => (x ? (sub ? x.subs[k] : x.cats[k]) || 0 : 0);
+  const row = (label, k, sub, cssVar, depth) => {
+    const p = pick(k, sub), now = p(monthly[to]), before = p(monthly[prev]), a3 = v.avgOver(monthly, last3, p), a12 = v.avgOver(monthly, last12, p);
+    if (!now && !before && !a12) return '';
+    const diff = a12 == null ? null : now - a12, cls = diff == null ? '' : diff > 0 ? 'down' : 'up';
+    const name = depth ? `<button type="button" class="link" data-pick="${esc(k)}">${esc(label || 'Other')}</button>`
+      : `<button type="button" class="link" data-open="${esc(k)}" aria-expanded="${spendOpen.has(k)}"><span class="dot" style="--c:var(${cssVar})"></span>${esc(label)}</button>`;
+    return `<tr class="${depth ? 'sub' : ''}"><td>${name}</td><td>${money(now)}</td><td>${money(before)}</td><td>${money(a3)}</td><td>${money(a12)}</td>
+      <td class="${cls}">${diff == null ? '–' : `${signed(diff)} <span class="muted">${a12 ? signedPct(diff / a12, 0) : ''}</span>`}</td><td>${spark(last12.map((m) => p(monthly[m])), cssVar)}</td></tr>`;
+  };
+  let html = `<tr><th>Category</th><th>${monthShort(to)}</th><th>${monthShort(prev)}</th><th>3-month avg</th><th>12-month avg</th><th>Against 12-month avg</th><th>Last 12 months</th></tr>`;
+  for (const c of allCats(v.d)) {
+    html += row(c, c, false, catVar(c), 0);
+    if (!spendOpen.has(c)) continue;
+    const subs = new Set([...subsOf(c), ...Object.keys(Object.assign({}, ...Object.values(monthly).map((x) => x.subs))).filter((k) => k.startsWith(c + '|')).map((k) => k.split('|')[1])]);
+    for (const s of subs) html += row(s, c + '|' + s, true, catVar(c), 1);
+    html += `<tr class="sub"><td><button type="button" class="link" data-pick="${esc(c)}">All ${esc(c.toLowerCase())}</button></td><td colspan="6"></td></tr>`;
+  }
+  html += `<tr class="total"><td>Total</td><td>${money(v.val(monthly, to))}</td><td>${money(v.val(monthly, prev))}</td><td>${money(v.avgOver(monthly, last3))}</td><td>${money(v.avgOver(monthly, last12))}</td><td></td><td></td></tr>`;
+  $('spend-cats').innerHTML = v.rows.length ? html : '<tr><td class="muted">Nothing to show for these kinds and cards. Import statements, or turn on more kinds above.</td></tr>';
+}
+
+// Editors for one row: category, subcategory, kind, paid back, trip and note. Each change saves.
+function txEditors(r, trips, cats) {
+  const opt = (val, label, on) => `<option value="${esc(val)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+  const subs = subsOf(r.category);
+  return `<td><select data-f="category">${cats.map((c) => opt(c, c, c === r.category)).join('')}</select></td>
+    <td><select data-f="subcategory">${opt('', '–', !r.subcategory)}${[...new Set([...subs, ...(r.subcategory ? [r.subcategory] : [])])].map((s) => opt(s, s, s === r.subcategory)).join('')}</select></td>
+    <td><select data-f="kind">${SPEND_KINDS.map(([k, n]) => opt(k, n, k === r.kind)).join('')}</select></td>
+    <td><input data-f="reimbursed" inputmode="decimal" value="${r.reimbursed ? plain(r.reimbursed, 2) : ''}" placeholder="0" aria-label="Paid back"></td>
+    <td><select data-f="trip_id">${opt('', '–', !r.trip_id)}${trips.map((t) => opt(t.id, t.name, t.id === r.trip_id)).join('')}</select></td>
+    <td><input data-f="note" value="${esc(r.note)}" placeholder="note" aria-label="Note"></td>`;
+}
+
+function renderSpendTxs(v) {
+  const el = $('spend-txs');
+  if (!spendPick) { el.innerHTML = ''; return; }
+  const [cat, sub] = spendPick.split('|');
+  const list = spendPick === 'unassigned'
+    ? v.mine.filter((r) => v.inRange(r) && r.kind === 'travel' && !r.trip_id)
+    : v.mine.filter((r) => v.inRange(r) && r.category === cat && (sub === undefined || (r.subcategory || '') === sub));
+  list.sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+  const title = spendPick === 'unassigned' ? 'Travel not in a trip' : sub === undefined ? cat : `${cat} · ${sub || 'Other'}`;
+  const shown = list.slice(0, 300);
+  el.innerHTML = `<div class="txhead"><h3>${esc(title)}, ${monthShort(v.from)} to ${monthShort(v.to)}: ${list.length} line${list.length === 1 ? '' : 's'}, ${money(list.reduce((t, r) => t + netOf(r), 0))}</h3>
+    <button class="btn" type="button" data-closetx>Close</button></div>
+    <p class="hint">Every kind is listed here, whatever the filters. A change is saved straight away and kept when you import again.</p>
+    <div class="scroll"><table class="txs"><tr><th>Date</th><th class="desc">Description</th><th>Amount</th><th>Category</th><th>Subcategory</th><th>Kind</th><th>Paid back</th><th>Trip</th><th>Note</th></tr>
+    ${shown.map((r) => `<tr data-id="${r.id}"><td>${dayMonth(r.date)} ${r.date.slice(2, 4)}</td><td class="desc">${esc(r.description)}<div class="muted">${esc(r.card)}${r.country && r.country !== 'SG' ? ' · ' + esc(r.country) : ''}${r.labelled_by === 'guess' ? ' · guessed' : ''}</div></td>
+      <td>${sgd2(r.amount)}</td>${txEditors(r, v.d.trips, allCats(v.d))}</tr>`).join('')}</table></div>${list.length > shown.length ? `<p class="fine">Showing the latest ${shown.length}.</p>` : ''}`;
+}
+
+async function updateRows(changes) {
+  try { const d = await api.updateExpenses(changes); showSpending(d); }
+  catch (e) { toast(saveError(e), true); showSpending(api.data); }
+}
+
+function renderStandouts(v) {
+  const rows = standouts(v.mine, v.from, v.to).filter((s) => s.row.labelled_by !== 'user');
+  const prices = recurringCharges(v.mine, v.to).filter((x) => x.change && x.last.labelled_by !== 'user' && !/not a standout/i.test(x.last.note || ''));
+  const last12 = Array.from({ length: 12 }, (_, k) => shiftMonth(v.to, k - 12));
+  const catJumps = allCats(v.d).filter((c) => !NOT_SPENDING.test(c)).map((c) => {
+    const now = (v.monthly[v.to] && v.monthly[v.to].cats[c]) || 0, avg = v.avgOver(v.monthly, last12, (x) => (x ? x.cats[c] || 0 : 0));
+    return avg != null && now > 1.5 * avg && now - avg > 200 ? `${c} in ${monthShort(v.to)} is ${money(now)}, ${money(now - avg)} above its 12-month average.` : null;
+  }).filter(Boolean);
+  const btns = (r) => payBackId === r.id
+    ? `<span class="inline">Paid back S$ <input id="spend-payback" inputmode="decimal" value="${plain(r.amount, 2)}"> <button class="btn" type="button" data-sact="payok" data-id="${r.id}">Save</button> <button class="btn" type="button" data-sact="paycancel">Cancel</button></span>`
+    : tripPickId === r.id
+      ? `<span class="inline"><select data-sact="tripto" data-id="${r.id}"><option value="">Choose a trip</option>${v.d.trips.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select> <button class="btn" type="button" data-sact="tripcancel">Cancel</button></span>`
+      : `${v.d.trips.length ? `<button type="button" data-sact="trip" data-id="${r.id}">Trip</button>` : ''}<button type="button" data-sact="one_off" data-id="${r.id}">One-off</button><button type="button" data-sact="recurring" data-id="${r.id}">Recurring</button><button type="button" data-sact="payback" data-id="${r.id}">Paid back</button><button type="button" data-sact="dismiss" data-id="${r.id}">Not a standout</button>`;
+  const item = (r, reasons) => `<li><div><b>${esc(r.description)}</b> <span class="muted">${dayMonth(r.date)} ${r.date.slice(0, 4)} · ${esc(r.category)} · ${kindName(r.kind)}</span></div>
+    <div class="amt">${sgd2(r.amount)}</div><div class="why">${reasons.map(esc).join('; ')}</div><div class="acts">${btns(r)}</div></li>`;
+  const list = [...rows.sort((a, b) => b.row.date.localeCompare(a.row.date)).map((s) => item(s.row, s.reasons)),
+    ...prices.map((x) => item(x.last, [`Price changed from ${sgd2(x.change.from)} to ${sgd2(x.change.to)}`]))];
+  $('spend-standouts').innerHTML = (catJumps.length ? `<ul class="jumps">${catJumps.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : '')
+    + (list.length ? `<ul class="standouts">${list.join('')}</ul>` : '<p class="hint">Nothing stands out in this period.</p>');
+}
+
+async function standoutAction(b) {
+  const act = b.dataset.sact, id = +b.dataset.id, r = api.data.expenses.find((x) => x.id === id);
+  if (act === 'paycancel' || act === 'tripcancel') { payBackId = tripPickId = null; return showSpending(api.data); }
+  if (act === 'payback') { payBackId = id; tripPickId = null; return showSpending(api.data); }
+  if (act === 'trip') { tripPickId = id; payBackId = null; return showSpending(api.data); }
+  if (act === 'payok') {
+    const amt = +String($('spend-payback').value).replace(/[^\d.]/g, '');
+    if (!(amt > 0)) return toast('Enter how much was paid back.', true);
+    payBackId = null;
+    return updateRows([{ id, kind: amt >= Number(r.amount) - 0.005 ? 'reimbursed' : r.kind, reimbursed: Math.min(amt, Number(r.amount)) }]);
+  }
+  if (act === 'dismiss') return updateRows([{ id, note: [r.note, 'not a standout'].filter(Boolean).join(' · ') }]);
+  if (act === 'one_off' || act === 'recurring') return updateRows([{ id, kind: act }]);
+}
+
+function renderRecurring(v) {
+  const list = recurringCharges(v.mine, v.to);
+  $('spend-recurring').innerHTML = list.length
+    ? `<tr><th>Merchant</th><th class="desc">Category</th><th>A month</th><th>Last charge</th><th>A year</th></tr>` + list.map((x) =>
+      `<tr><td>${esc(x.merchant)}</td><td class="desc">${esc(x.last.category)}${x.last.subcategory ? ' · ' + esc(x.last.subcategory) : ''}</td><td>${sgd2(x.monthly)}</td>
+      <td>${dayMonth(x.last.date)} ${x.last.date.slice(2, 4)}, ${sgd2(x.last.amount)}${x.change ? ` <span class="down">was ${sgd2(x.change.from)}</span>` : ''}</td><td>${money(x.yearly)}</td></tr>`).join('')
+      + `<tr class="total"><td>Total</td><td></td><td>${sgd2(list.reduce((t, x) => t + x.monthly, 0))}</td><td></td><td>${money(list.reduce((t, x) => t + x.yearly, 0))}</td></tr>`
+    : '<tr><td class="muted">None yet: this needs at least 3 of the last 4 months imported.</td></tr>';
+}
+
+function renderTravel(v) {
+  const rows = v.mine.filter((r) => r.kind === 'travel' && v.inRange(r)), lines = tripTable(rows, v.d.trips).filter((l) => Math.abs(l.total) >= 0.5);
+  const totals = {};
+  for (const l of lines) for (const [k, x] of Object.entries(l.subs)) totals[k] = (totals[k] || 0) + x;
+  const all = lines.reduce((t, l) => t + l.total, 0), n = v.months.filter(v.covered).length;
+  const cells = (subs) => TRAVEL_SUBS.map((s) => `<td>${subs[s] ? money(subs[s]) : ''}</td>`).join('');
+  $('spend-travel').innerHTML = lines.length
+    ? `<tr><th>Trip</th>${TRAVEL_SUBS.map((s) => `<th>${esc(s)}</th>`).join('')}<th>Total</th><th>Per day</th></tr>` + lines.map((l) =>
+      `<tr><td>${l.key === 'unassigned' ? `<button type="button" class="link" data-pick="unassigned">${esc(l.name)}</button>` : esc(l.name)}${l.trip && l.trip.start_date ? `<div class="muted">${longDate(l.trip.start_date)} to ${longDate(l.trip.end_date)}</div>` : ''}</td>
+      ${cells(l.subs)}<td>${money(l.total)}</td><td>${l.days ? money(l.total / l.days) : ''}</td></tr>`).join('')
+      + `<tr class="total"><td>${monthShort(v.from)} to ${monthShort(v.to)}</td>${cells(totals)}<td>${money(all)}</td><td></td></tr>`
+      + `<tr><td class="muted">A month on average</td>${TRAVEL_SUBS.map((s) => `<td class="muted">${totals[s] && n ? money(totals[s] / n) : ''}</td>`).join('')}<td class="muted">${n ? money(all / n) : ''}</td><td></td></tr>`
+    : '<tr><td class="muted">No travel in this period.</td></tr>';
+  renderTripSuggestions(v);
+  renderTrips(v);
+}
+
+function renderTripSuggestions(v) {
+  const fresh = suggestTrips(v.all, v.d.trips), sig = fresh.map((g) => g.start + g.end).join();
+  if (!tripDraft || tripDraft.sig !== sig) tripDraft = { sig, list: fresh };
+  const list = tripDraft.list;
+  $('spend-tripsugg').innerHTML = list.length ? `<h3>Suggested trips</h3><p class="hint">Purchases abroad grouped by date. Accept to save a trip: travel in its dates is linked to it, including flights and hotels paid from Singapore during the trip.</p>
+    <table class="trips">${list.map((g, i) => `<tr><td><input data-tname="${i}" value="${esc(g.name)}" aria-label="Trip name"></td><td>${longDate(g.start)} to ${longDate(g.end)}</td><td>${g.rows.length} lines</td><td>${money(g.total)}</td>
+      <td><button class="btn" type="button" data-tacc="${i}">Accept</button> ${i < list.length - 1 ? `<button class="btn" type="button" data-tmerge="${i}">Merge with next</button>` : ''} ${new Set(g.rows.map((r) => r.date)).size > 1 ? `<button class="btn" type="button" data-tsplit="${i}">Split</button>` : ''} <button class="btn" type="button" data-tdrop="${i}">Not a trip</button></td></tr>`).join('')}</table>` : '';
+}
+
+function renderTrips(v) {
+  const trips = v.d.trips;
+  $('spend-trips-edit').hidden = !trips.length;
+  $('spend-trips').innerHTML = trips.length ? `<table class="trips">${trips.map((t) => `<tr data-trip="${t.id}"><td><input data-tf="name" value="${esc(t.name)}" aria-label="Trip name"></td>
+    <td><input type="date" data-tf="start_date" value="${t.start_date || ''}" aria-label="Start"></td><td><input type="date" data-tf="end_date" value="${t.end_date || ''}" aria-label="End"></td>
+    <td><button class="btn" type="button" data-tsave="${t.id}">Save</button> <button class="btn danger" type="button" data-tdel="${t.id}">Delete</button></td></tr>`).join('')}</table>` : '';
+}
+
+async function tripAction(b) {
+  const list = tripDraft ? tripDraft.list : [];
+  if (b.dataset.tacc != null) {
+    const g = list[+b.dataset.tacc], name = ($('spend-tripsugg').querySelector(`[data-tname="${b.dataset.tacc}"]`).value || g.name).trim();
+    try { const d = await api.saveTrip({ name, start_date: g.start, end_date: g.end }); tripDraft = null; toast(`Saved ${name}`); showSpending(d); } catch (e) { toast(saveError(e), true); }
+    return;
+  }
+  if (b.dataset.tmerge != null) {
+    const i = +b.dataset.tmerge, a = list[i], c = list[i + 1];
+    list.splice(i, 2, { ...a, end: c.end, rows: [...a.rows, ...c.rows], total: a.total + c.total });
+  } else if (b.dataset.tsplit != null) {
+    const i = +b.dataset.tsplit, g = list[i], dates = [...new Set(g.rows.map((r) => r.date))].sort();
+    let at = 1;
+    for (let k = 1; k < dates.length; k++) if (daysBetween(dates[k - 1], dates[k]) > daysBetween(dates[at - 1], dates[at])) at = k;
+    const part = (rows) => ({ ...g, start: rows[0].date, end: rows.at(-1).date, rows, total: rows.reduce((t, r) => t + netOf(r), 0) });
+    list.splice(i, 1, part(g.rows.filter((r) => r.date < dates[at])), part(g.rows.filter((r) => r.date >= dates[at])));
+  } else if (b.dataset.tdrop != null) list.splice(+b.dataset.tdrop, 1);
+  else if (b.dataset.tsave != null) {
+    const tr = b.closest('tr'), val = (f) => tr.querySelector(`[data-tf="${f}"]`).value;
+    try { const d = await api.saveTrip({ id: +b.dataset.tsave, name: val('name'), start_date: val('start_date'), end_date: val('end_date') }); toast('Trip saved'); showSpending(d); } catch (e) { toast(saveError(e), true); }
+    return;
+  } else if (b.dataset.tdel != null) {
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+    try { const d = await api.deleteTrip(+b.dataset.tdel); toast('Trip deleted'); showSpending(d); } catch (e) { toast(saveError(e), true); }
+    return;
+  }
+  renderTripSuggestions(spendView(api.data));
+}
+
+// The review queue: merchants whose rows were guessed or are uncategorised (one item per merchant,
+// so one choice can cover them all), and standouts not yet labelled.
+function reviewItems(v) {
+  const groups = {};
+  for (const r of v.mine) {
+    if (r.labelled_by === 'user' || r.kind === 'excluded' || (r.labelled_by !== 'guess' && r.category !== 'Uncategorised')) continue;
+    const g = groups[r.merchant] || (groups[r.merchant] = { merchant: r.merchant, rows: [], total: 0 });
+    g.rows.push(r);
+    g.total += netOf(r);
+  }
+  const outs = standouts(v.mine, v.from, v.to).filter((s) => s.row.labelled_by !== 'user');
+  return [...Object.values(groups).sort((a, b) => b.total - a.total), ...outs.map((s) => ({ standout: s }))];
+}
+
+function renderReview(v) {
+  const items = reviewItems(v), groups = items.filter((x) => x.merchant), outs = items.length - groups.length;
+  const opt = (val, label, on) => `<option value="${esc(val)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+  $('spend-review').innerHTML = (outs ? `<p class="hint">${outs} standout${outs === 1 ? '' : 's'} above to label.</p>` : '')
+    + (groups.length ? `<p class="hint">Merchants nothing recognised, guessed from the amount, or left uncategorised. Pick a category once; "Apply to all" saves a rule so future imports follow it.</p>
+    <div class="scroll"><table class="review">${groups.slice(0, 40).map((g, i) => {
+      const r = g.rows[0];
+      return `<tr data-merchant="${esc(g.merchant)}"><td class="desc"><b>${esc(g.merchant)}</b><div class="muted">${g.rows.length} line${g.rows.length === 1 ? '' : 's'}, latest ${dayMonth(g.rows.at(-1).date)} ${g.rows.at(-1).date.slice(2, 4)} · ${esc(r.description)}</div></td><td>${money(g.total)}</td>
+        <td><select data-rf="category">${allCats(v.d).map((c) => opt(c, c, c === r.category)).join('')}</select></td>
+        <td><select data-rf="subcategory">${opt('', '–', !r.subcategory)}${subsOf(r.category).map((s) => opt(s, s, s === r.subcategory)).join('')}</select></td>
+        <td><label class="check"><input type="checkbox" data-rf="all" checked> Apply to all from this merchant</label></td>
+        <td><button class="btn" type="button" data-rsave="${i}">Save</button></td></tr>`;
+    }).join('')}</table></div>${groups.length > 40 ? `<p class="fine">Showing the 40 largest of ${groups.length}.</p>` : ''}`
+      : outs ? '' : '<p class="hint">Nothing to review.</p>');
+}
+
+async function reviewSave(b) {
+  const tr = b.closest('tr'), merchant = tr.dataset.merchant, get = (f) => tr.querySelector(`[data-rf="${f}"]`);
+  const category = get('category').value, subcategory = get('subcategory').value, kind = NOT_SPENDING.test(category) ? 'excluded' : null;
+  const rows = api.data.expenses.filter((r) => r.merchant === merchant && r.labelled_by !== 'user');
+  try {
+    if (get('all').checked) {
+      const d = await api.saveRule({ pattern: `^${escapeRe(merchant)}$`, category, subcategory, kind, priority: 100, note: 'Added from To review' });
+      const d2 = await api.applyRule(d.rule_id);
+      toast(`Saved a rule; ${d2.changed} line${d2.changed === 1 ? '' : 's'} changed`);
+      showSpending(d2);
+    } else await updateRows(rows.map((r) => ({ id: r.id, category, subcategory, ...(kind ? { kind } : {}) })));
+  } catch (e) { toast(saveError(e), true); }
+}
+
+function renderImported(v) {
+  const { expenses: rows, statements: stmts } = v.d;
+  const dates = rows.map((r) => r.date).sort();
+  $('spend-summary').textContent = rows.length ? `${rows.length.toLocaleString('en-SG')} lines, ${monthLong(dates[0].slice(0, 7))} to ${monthLong(dates.at(-1).slice(0, 7))}.` : 'Nothing imported yet.';
+  const count = {};
+  for (const r of rows) if (r.statement_id) count[r.statement_id] = (count[r.statement_id] || 0) + 1;
+  $('spend-statements').innerHTML = stmts.length ? `<tr><th>From</th><th class="desc">Card or account</th><th>Period</th><th>Lines kept</th><th></th></tr>` + stmts.slice().reverse().map((s) =>
+    `<tr><td>${SPEND_SOURCES[s.source] || esc(s.source)}</td><td class="desc">${esc(s.card)}</td><td>${longDate(s.period_start)} to ${longDate(s.period_end)}</td><td>${count[s.id] || 0}</td>
+    <td><button class="btn" type="button" data-undo="${s.id}">Undo import</button></td></tr>`).join('') : '';
+}
+
+function renderRules(v) {
+  const rules = v.d.expense_rules;
+  $('spend-rules').innerHTML = rules.length ? `<tr><th>Priority</th><th class="desc">Pattern</th><th class="desc">Category</th><th>Kind</th><th></th></tr>` + rules.map((r) =>
+    `<tr><td>${r.priority}</td><td class="desc"><code>${esc(r.pattern)}</code></td><td class="desc">${esc(r.category)}${r.subcategory ? ' · ' + esc(r.subcategory) : ''}</td><td>${r.kind ? kindName(r.kind) : 'as detected'}</td>
+    <td><button class="btn" type="button" data-rdel="${r.id}">Delete</button></td></tr>`).join('') : '<tr><td class="muted">No rules of your own yet.</td></tr>';
+}
+
+function wireSpending() {
+  if (spendWired) return;
+  spendWired = true;
+  $('spend-btn').onclick = () => $('spend-file').click();
+  $('spend-file').onchange = async (ev) => {
+    const files = [...ev.target.files];
+    ev.target.value = '';
+    if (files.length) await importSpending(files);
+  };
+  $('spend-import').onclick = async (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.spendcancel != null) { spendImport = null; renderSpendImport(); }
+    else if (b.dataset.spendsave != null) await saveSpendImport();
+    else if (b.dataset.usedate != null) {
+      const f = spendImport.files[+b.dataset.usedate], val = $('spend-import').querySelector(`[data-sdate="${b.dataset.usedate}"]`).value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(val)) return toast('Enter the statement date.', true);
+      f.stmtDate = val;
+      buildSpendImport();
+      renderSpendImport();
+    }
+  };
+  $('spend-filters').onclick = (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.range) spendState.range = b.dataset.range;
+    if (b.dataset.kind) spendState.kinds[b.dataset.kind] = !spendState.kinds[b.dataset.kind];
+    if (b.dataset.src) spendState.off[b.dataset.src] = !spendState.off[b.dataset.src];
+    saveSpendState();
+    showSpending(api.data);
+  };
+  $('spend-filters').onchange = (ev) => {
+    if (ev.target.id === 'spend-from') spendState.from = ev.target.value;
+    if (ev.target.id === 'spend-to') spendState.to = ev.target.value;
+    saveSpendState();
+    showSpending(api.data);
+  };
+  $('spend-cats').onclick = (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    if (b.dataset.open) { if (spendOpen.has(b.dataset.open)) spendOpen.delete(b.dataset.open); else spendOpen.add(b.dataset.open); }
+    if (b.dataset.pick) spendPick = b.dataset.pick;
+    showSpending(api.data);
+    if (b.dataset.pick) $('spend-txs').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  $('spend-travel').onclick = (ev) => {
+    const b = ev.target.closest('button[data-pick]');
+    if (!b) return;
+    spendPick = b.dataset.pick;
+    showSpending(api.data);
+    $('spend-txs').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  $('spend-txs').onclick = (ev) => { if (ev.target.closest('[data-closetx]')) { spendPick = null; showSpending(api.data); } };
+  $('spend-txs').onchange = (ev) => {
+    const f = ev.target.dataset.f, tr = ev.target.closest('tr[data-id]');
+    if (!f || !tr) return;
+    let value = ev.target.value;
+    const change = { id: +tr.dataset.id };
+    if (f === 'reimbursed') { value = +String(value).replace(/[^\d.]/g, '') || 0; }
+    if (f === 'trip_id') value = value ? +value : null;
+    change[f] = value;
+    if (f === 'category') change.subcategory = '';
+    if (f === 'category' && NOT_SPENDING.test(value)) change.kind = 'excluded';
+    updateRows([change]);
+  };
+  $('spend-standouts').onclick = (ev) => { const b = ev.target.closest('button[data-sact]'); if (b) standoutAction(b); };
+  $('spend-standouts').onchange = async (ev) => {
+    const s = ev.target.closest('select[data-sact="tripto"]');
+    if (!s || !s.value) return;
+    const t = api.data.trips.find((x) => x.id === +s.value);
+    tripPickId = null;
+    try { const d = await api.saveTrip({ id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date, note: t.note, expense_ids: [+s.dataset.id] }); toast(`Moved to ${t.name}`); showSpending(d); }
+    catch (e) { toast(saveError(e), true); }
+  };
+  $('spend-tripsugg').onclick = (ev) => { const b = ev.target.closest('button'); if (b) tripAction(b); };
+  $('spend-trips').onclick = (ev) => { const b = ev.target.closest('button'); if (b) tripAction(b); };
+  $('spend-review').onclick = (ev) => { const b = ev.target.closest('button[data-rsave]'); if (b) reviewSave(b); };
+  $('spend-review').onchange = (ev) => {
+    if (ev.target.dataset.rf !== 'category') return;
+    const sub = ev.target.closest('tr').querySelector('[data-rf="subcategory"]');
+    sub.innerHTML = '<option value="">–</option>' + subsOf(ev.target.value).map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+  };
+  $('spend-statements').onclick = async (ev) => {
+    const b = ev.target.closest('button[data-undo]');
+    if (!b) return;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to remove its lines'; return; }
+    try { const d = await api.deleteExpenses({ statement_id: +b.dataset.undo }); toast(`Removed ${d.deleted} line${d.deleted === 1 ? '' : 's'}`); showSpending(d); } catch (e) { toast(saveError(e), true); }
+  };
+  $('spend-rules').onclick = async (ev) => {
+    const b = ev.target.closest('button[data-rdel]');
+    if (!b) return;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Click again to delete'; return; }
+    try { const d = await api.deleteRule(+b.dataset.rdel); toast('Rule deleted; lines keep their category until a rule changes them'); showSpending(d); } catch (e) { toast(saveError(e), true); }
+  };
+}
+
+// Self-tests on made-up data, in the exact layouts the importers read; console only.
+(function checkSpending() {
+  const fails = [], ok = (c, label) => { if (!c) fails.push(label); };
+  ok(merchantKey('Grab* A-9LKN8B9WX4LNAV') === 'GRAB', 'merchant key drops booking codes');
+  ok(merchantKey('BUS/MRT 000000000') === 'BUS/MRT' && merchantKey('TEST CAFE\nRef No: 12345678901') === 'TEST CAFE', 'merchant key drops numbers and Ref No');
+  ok(bankMerchant('PAYNOW EXTERNAL TRANSFER MBKFT00000000D00 TEST PERSON OTHR-OTHER') === 'TEST PERSON', 'bank payee');
+  ok(splitCountry(['SAN FRANCISCOUS']).country === 'US' && splitCountry(['Singapore', 'SG']).country === 'SG' && splitCountry(['SINGAPORE', 'SGP']).country === 'SG'
+    && splitCountry(['Johor BMY']).country === 'MY' && splitCountry(['SGD']).country === null, 'country codes');
+  const cat = (o) => categorise({ source: 'citi_card', description: o.merchant, country: 'SG', ...o }, o.rules);
+  ok(cat({ merchant: 'GRAB', amount: 12 }).subcategory === 'Ride-hailing' && cat({ merchant: 'GRAB', amount: 12, country: 'JP' }).subcategory === 'Local transport', 'ride-hailing at home and abroad');
+  ok(cat({ merchant: 'TEST BISTRO', amount: 40 }).subcategory === 'Casual restaurants (S$25–80)' && cat({ merchant: 'TEST BISTRO', amount: 40 }).labelled_by === 'guess', 'dining guessed by amount');
+  ok(cat({ merchant: 'TEST BISTRO', amount: 400 }).category === 'Uncategorised', 'large unknown is uncategorised');
+  ok(cat({ merchant: 'TEST BISTRO', amount: 40, rules: [{ pattern: '^TEST BISTRO$', category: 'Groceries', subcategory: '' }] }).category === 'Groceries', 'user rule first');
+  ok(cat({ merchant: 'APPLE.COM/BILL', amount: 4, country: 'IE' }).category === 'Bills', 'subscriptions abroad stay bills');
+
+  const L = (...cells) => ({ cells, text: cells.join(' ') });
+  const card = readCitiCard([
+    L('Statement Date January 15, 2026'),
+    L('CITI REWARDS WORLD MASTERCARD 0000 0000 0000 0000 Payment Due Date: February 09, 2026'),
+    L('PREVIOUS PAYMENTS PURCHASES INTEREST FEES CURRENT'),
+    L('10.00 15.00 80.00 0.00 0.29 75.29'),
+    L('TRANSACTIONS FOR CITI REWARDS WORLD MASTERCARD'),
+    L('BALANCE PREVIOUS STATEMENT', '10.00'),
+    L('03 JAN', 'PAYMENT - ATM/INTERNET', '(10.00)'),
+    L('SUB-TOTAL:', '(10.00)'),
+    L('28 DEC', 'TEST CAFE', 'TOKYO', 'JP', '30.00'),
+    L('FOREIGN AMOUNT JAPANESE YEN 3,200.00'),
+    L('XXXX-XXXX-XXXX-0000'),
+    L('29 DEC', 'CCY CONVERSION FEE', 'SGD', '30.00', '0.29'),
+    L('05 JAN', 'Grab* A-0TESTCODE0AV', 'Singapore', 'SG', '50.00', '4'),
+    L('06 JAN', 'TEST SHOP', 'SAN FRANCISCOUS', '(5.00)'),
+    L('GRAND TOTAL', '75.29'),
+  ]);
+  const c0 = card.cards[0], rows = c0 ? datedRows(c0, card.stmtDate) : [];
+  ok(card.stmtDate === '2026-01-15' && c0 && c0.card === 'Citi Rewards' && rows.length === 4 && c0.payments === 1, 'card statement read');
+  ok(rows[0] && rows[0].date === '2025-12-28' && rows[0].country === 'JP' && rows[0].fx_currency === 'JPY' && rows[0].fx_amount === 3200, 'December line dated the year before, with its foreign leg');
+  ok(rows[1] && rows[1].amount === 0.29 && rows[2] && rows[2].merchant === 'GRAB' && rows[2].amount === 50 && rows[3] && rows[3].amount === -5 && rows[3].country === 'US', 'fee, margin noise and refund');
+  ok(c0 && reconcileCard(c0).ok === true, 'card adds up');
+  ok(!JSON.stringify(rows).includes('0000 0000'), 'no card number kept');
+
+  const uob = readUob([['Account Number:', '0000'], ['Account Type:', 'TEST CARD'], ['Statement Date:', '01 Jan 2026 To 31 Jan 2026'], [],
+    ['Transaction Date', 'Posting Date', 'Description', 'Foreign Currency Type', 'Transaction Amount(Foreign)', 'Local Currency Type', 'Transaction Amount(Local)'],
+    ['20 Jan 2026', '', 'TEST MART - MALL    SINGAPORE     SGP', '', '', 'SGD', 12.5],
+    ['18 Jan 2026', '19 Jan 2026', 'TEST VILLA           TEST TOWN - AREAID\nRef No: 00000000000', 'IDR', '100,000', 'SGD', 8.6],
+    ['16 Jan 2026', '16 Jan 2026', 'PAYMT THRU E-BANK/HOMEB/CYBERB (EP00)', '', '', 'SGD', -50],
+    ['', '', 'Previous Balance', '', '', 'SGD', 50]]);
+  ok(uob.card === 'UOB Test' && uob.rows.length === 2 && uob.payments === 1 && uob.start === '2026-01-01', 'UOB export read');
+  ok(uob.rows[0] && uob.rows[0].merchant === 'TEST MART - MALL' && uob.rows[0].country === 'SG' && uob.rows[0].posted === null, 'UOB pending line');
+  ok(uob.rows[1] && uob.rows[1].merchant === 'TEST VILLA' && uob.rows[1].country === 'ID' && uob.rows[1].fx_amount === 100000 && !/Ref No/i.test(uob.rows[1].description), 'UOB foreign line without Ref No');
+
+  let id = 0;
+  const x = (date, merchant, amount, o = {}) => ({ id: ++id, date, merchant, description: merchant, amount, reimbursed: 0, kind: 'recurring', category: 'Dining', subcategory: '', source: 'manual', card: '', note: '', labelled_by: 'rule', ...o });
+  const data = [
+    x('2026-01-05', 'TEST STREAM', 15.99, { category: 'Bills' }), x('2026-02-05', 'TEST STREAM', 15.99, { category: 'Bills' }),
+    x('2026-03-05', 'TEST STREAM', 15.99, { category: 'Bills' }), x('2026-04-05', 'TEST STREAM', 17.99, { category: 'Bills' }),
+    x('2026-01-10', 'TEST CAFE', 10), x('2026-02-10', 'TEST CAFE', 20, { reimbursed: 5 }), x('2026-04-20', 'TEST TV', 1200, { category: 'Shopping' }),
+    x('2026-03-01', 'TEST RAMEN', 30, { kind: 'travel', category: 'Travel', subcategory: 'Food and drink', country: 'JP' }),
+    x('2026-03-03', 'TEST TAXI', 20, { kind: 'travel', category: 'Travel', subcategory: 'Local transport', country: 'JP' }),
+    x('2026-03-20', 'TEST TAXI', 10, { kind: 'travel', category: 'Travel', subcategory: 'Local transport', country: 'JP' }),
+  ];
+  const mo = spendMonthly(data);
+  ok(Math.abs(mo['2026-02'].total - 30.99) < 1e-9 && mo['2026-03'].cats.Travel === 60, 'monthly totals net of paid back');
+  const avg = rolling12(['2026-03'], (m) => (mo[m] ? mo[m].total : 0), (m) => m >= '2026-01');
+  ok(Math.abs(avg[0] - (25.99 + 30.99 + 75.99) / 3) < 1e-9, 'rolling average divides by months covered');
+  const rec = recurringCharges(data, '2026-04');
+  ok(rec.length === 1 && rec[0].merchant === 'TEST STREAM' && rec[0].change && rec[0].change.to === 17.99, 'recurring charge and price change');
+  ok(standouts(data, '2026-04', '2026-04').some((s) => s.row.merchant === 'TEST TV'), 'big purchase stands out');
+  const trips = suggestTrips(data, []);
+  ok(trips.length === 2 && trips[0].start === '2026-03-01' && trips[0].end === '2026-03-03' && /Japan, Mar 2026/.test(trips[0].name), 'trips suggested by gaps');
+  const tt = tripTable(data.filter((r) => r.kind === 'travel'), [{ id: 1, name: 'T', start_date: '2026-03-01', end_date: '2026-03-03' }].map((t) => t)).find((l) => l.key === 'unassigned');
+  ok(tt && tt.total === 60, 'travel outside a trip is unassigned');
+  if (fails.length) console.warn('Spending self-check failed: ' + fails.join('; '));
+})();
 
 // ---------- tabs and start-up ----------
 const TABS = { overview: showOverview, activity: showActivity, spending: showSpending, home: showHome, update: showUpdate };
@@ -2114,7 +3276,11 @@ function showTab(name) {
   if (api.data && stale[name]) { stale[name] = false; TABS[name](api.data); }
 }
 const currentTab = () => Object.keys(TABS).find((t) => !$('page-' + t).hidden) || 'overview';
-function paint() { stale = { overview: true, activity: true, spending: true, home: true, update: true }; showTab(currentTab()); }
+function paint() {
+  stale = { overview: true, activity: true, spending: true, home: true, update: true };
+  showTab(currentTab());
+  if (api.data && currentTab() !== 'spending') setSpendBadge(api.data, Array.isArray(api.data.expenses) ? spendView(api.data) : null);
+}
 // A save on one tab changes what the others show.
 // Activity and Update redraw themselves after their own saves; the Overview never saves, so it's
 // redrawn here if it's the tab on screen.
