@@ -93,7 +93,8 @@ months gives 4,216.04 a month and ends within a cent of zero, and `console.warn`
 
 The mortgage section shows this month's instalment (or the first, before it starts), a rate card at
 the current, base and adverse rates over the balance and months left, total interest, and a yearly
-schedule in a collapsed `<details>`. Within 90 days of the current period's `lock_in_end`
+schedule in a collapsed `<details>`. With `cpf_monthly` 0 the CPF lines and columns are left out
+and the whole instalment counts as cash. Within 90 days of the current period's `lock_in_end`
 (`repricing()`), it shows a repricing alert. The Overview's "Due soon" card (`renderDueSoon`, hidden
 when empty) lists planned commitments due within 90 days, nearest first, plus that alert.
 

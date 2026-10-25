@@ -2032,8 +2032,9 @@ function renderLoan(d) {
   const i = loanIndex(rows, today), r = rows[i], started = today.slice(0, 7) >= rows[0].month;
   const remaining = i === 0 ? Number(loan.principal) : rows[i - 1].balance, months = rows.length - i;
   const line = (k, v, cls = '') => `<div class="${cls}"><dt>${k}</dt><dd>${v}</dd></div>`;
+  const cpf = Number(loan.cpf_monthly) > 0;
   const card = [['Current rate', r.rate], ['Base rate', loan.base_rate], ['Adverse rate', loan.adverse_rate]].filter(([, x]) => x != null)
-    .map(([k, x]) => { const inst = annuity(remaining, Number(x) / 1200, months); return line(`${k}, ${plain(Number(x), 3)}%`, `${sgd2(inst)} <span class="muted">· ${sgd2(Math.max(0, inst - (Number(loan.cpf_monthly) || 0)))} cash</span>`); }).join('');
+    .map(([k, x]) => { const inst = annuity(remaining, Number(x) / 1200, months); return line(`${k}, ${plain(Number(x), 3)}%`, sgd2(inst) + (cpf ? ` <span class="muted">· ${sgd2(Math.max(0, inst - Number(loan.cpf_monthly)))} cash</span>` : '')); }).join('');
   const years = {};
   for (const x of rows) {
     const y = years[x.month.slice(0, 4)] || (years[x.month.slice(0, 4)] = { n: 0, instalments: 0, interest: 0, principal: 0, cpf: 0, cash: 0, balance: 0 });
@@ -2044,18 +2045,17 @@ function renderLoan(d) {
     <div class="summary"><h3>${started ? `This month, ${monthLong(r.month)}` : `First instalment, ${longDate(r.date)}`}</h3><dl class="flow">
       ${line('Instalment', sgd2(r.instalment), 'total')}
       ${line('Interest', sgd2(r.interest))}${line('Principal', sgd2(r.principal))}
-      ${line('From CPF', sgd2(r.cpf))}${line('From cash', sgd2(r.cash))}
+      ${cpf ? line('From CPF', sgd2(r.cpf)) + line('From cash', sgd2(r.cash)) : ''}
       ${line('Owed after this instalment', sgd2(Math.max(0, r.balance)))}
       ${line('Instalments left', `${months} of ${rows.length}`)}
-      ${line('CPF used so far', sgd2(r.cpfUsed))}
-      ${line('CPF to return with interest', `${sgd2(r.cpfAccrued)} <span class="muted">estimate</span>`)}
+      ${cpf ? line('CPF used so far', sgd2(r.cpfUsed)) + line('CPF to return with interest', `${sgd2(r.cpfAccrued)} <span class="muted">estimate</span>`) : ''}
     </dl></div>
-    <div class="summary"><h3>Rate card</h3><p class="fine">Instalment over the remaining ${sgd2(remaining)} and ${months} months, and the cash part after CPF.</p><dl class="flow">${card}</dl>
+    <div class="summary"><h3>Rate card</h3><p class="fine">Instalment over the remaining ${sgd2(remaining)} and ${months} months${cpf ? ', and the cash part after CPF' : ''}.</p><dl class="flow">${card}</dl>
       <p class="fine">Total interest over the loan at the current schedule: ${sgd2(rows.reduce((t, x) => t + x.interest, 0))}. Last instalment ${monthLong(end.month)}.</p></div>
   </div>
   <details><summary>Schedule by year</summary><div class="scroll"><table>
-    <tr><th>Year</th><th>Instalments</th><th>Paid</th><th>Interest</th><th>Principal</th><th>CPF</th><th>Cash</th><th>Owed at year end</th></tr>
-    ${Object.entries(years).map(([y, x]) => `<tr><td>${y}</td><td>${x.n}</td><td>${money(x.instalments)}</td><td>${money(x.interest)}</td><td>${money(x.principal)}</td><td>${money(x.cpf)}</td><td>${money(x.cash)}</td><td>${money(Math.max(0, x.balance))}</td></tr>`).join('')}
+    <tr><th>Year</th><th>Instalments</th><th>Paid</th><th>Interest</th><th>Principal</th>${cpf ? '<th>CPF</th><th>Cash</th>' : ''}<th>Owed at year end</th></tr>
+    ${Object.entries(years).map(([y, x]) => `<tr><td>${y}</td><td>${x.n}</td><td>${money(x.instalments)}</td><td>${money(x.interest)}</td><td>${money(x.principal)}</td>${cpf ? `<td>${money(x.cpf)}</td><td>${money(x.cash)}</td>` : ''}<td>${money(Math.max(0, x.balance))}</td></tr>`).join('')}
   </table></div></details>`;
 }
 
